@@ -1,0 +1,10 @@
+node_modules/
+dist/
+out/
+*.vsix
+.test-*/
+.env
+.env.*
+!.env.example
+.vsce
+*.log

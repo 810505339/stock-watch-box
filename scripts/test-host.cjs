@@ -1,0 +1,26 @@
+const { spawn } = require('node:child_process');
+const { mkdirSync, writeFileSync, readFileSync, rmSync } = require('node:fs');
+const path = require('node:path');
+const root = path.resolve(__dirname, '..');
+const output = path.join(root, '.test-host');
+mkdirSync(output, { recursive: true });
+const report = path.join(output, 'result.json');
+rmSync(report, { force: true });
+const runner = path.join(output, 'runner.cjs');
+writeFileSync(runner, `const vscode=require('vscode'); const assert=require('node:assert/strict'); const fs=require('node:fs');
+exports.run=async()=>{try {
+const extension=vscode.extensions.getExtension('local-stock-watch.stock-watch-box'); assert.ok(extension,'extension discovered');
+const api=await extension.activate(); assert.ok(extension.isActive,'extension activates');
+const commands=await vscode.commands.getCommands(true); for(const name of ['open','refresh','addGroup','addStock','position','clearPosition','move','remove','renameGroup','deleteGroup','toggleVisibility']) assert.ok(commands.includes('stockWatch.'+name),name+' registered');
+await vscode.commands.executeCommand('stockWatch.open'); await vscode.commands.executeCommand('stockWatch.refresh');
+const snapshot=api.getSnapshot(); assert.equal(snapshot.state.version,1); assert.ok(snapshot.state.groups.length>=1); assert.equal(snapshot.error,'');
+fs.writeFileSync(${JSON.stringify(report)},JSON.stringify({passed:true,version:vscode.version,checks:['discovery','activation','11 commands','view focus','refresh','state snapshot']},null,2));
+}catch(e){fs.writeFileSync(${JSON.stringify(report)},JSON.stringify({passed:false,error:String(e.stack||e)}));throw e;}};`);
+const executable = process.env.VSCODE_EXECUTABLE || 'D:\\Programs\\Microsoft VS Code\\Code.exe';
+const args = ['--extensionDevelopmentPath=' + root, '--extensionTestsPath=' + runner, '--user-data-dir=' + path.join(root, '.test-user'), '--extensions-dir=' + path.join(root, '.test-extensions'), '--skip-welcome', '--skip-release-notes', '--disable-updates', '--disable-telemetry', '--new-window'];
+const environment = { ...process.env }; delete environment.ELECTRON_RUN_AS_NODE;
+const child = spawn(executable, args, { env: environment, stdio: 'pipe', windowsHide: true });
+let tail=''; child.stdout.on('data',d=>{tail=(tail+d).slice(-3000)}); child.stderr.on('data',d=>{tail=(tail+d).slice(-3000)});
+const timeout=setTimeout(()=>{child.kill(); console.error('VS Code host test timed out',tail);process.exitCode=1},90000);
+child.on('error',e=>{clearTimeout(timeout);console.error(e);process.exitCode=1});
+child.on('exit',code=>{clearTimeout(timeout);try{const result=JSON.parse(readFileSync(report,'utf8'));console.log(JSON.stringify(result,null,2));process.exitCode=result.passed?0:1}catch{console.error(tail);process.exitCode=code||1}});

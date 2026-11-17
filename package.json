@@ -1,0 +1,64 @@
+{
+  "name": "stock-watch-box",
+  "displayName": "盯盘盒子",
+  "description": "简洁的股票与场内基金盯盘侧栏 · 腾讯行情 · 分类自选 · 持仓盈亏",
+  "version": "0.1.13",
+  "publisher": "local-stock-watch",
+  "repository": { "type": "git", "url": "https://github.com/810505339/stock-watch-box.git" },
+  "license": "MIT",
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["Other"],
+  "keywords": ["股票", "ETF", "腾讯行情", "持仓", "stock"],
+  "extensionKind": ["ui"],
+  "main": "./dist/extension.js",
+  "activationEvents": ["onView:stockWatch.board"],
+  "capabilities": { "untrustedWorkspaces": { "supported": true }, "virtualWorkspaces": true },
+  "contributes": {
+    "viewsContainers": { "activitybar": [{ "id": "stockWatch", "title": "盯盘盒子", "icon": "media/activity.svg" }] },
+    "views": { "stockWatch": [{ "type": "webview", "id": "stockWatch.board", "name": "自选行情", "icon": "media/activity.svg" }] },
+    "commands": [
+      { "command": "stockWatch.open", "title": "盯盘盒子：打开盯盘" },
+      { "command": "stockWatch.toggleVisibility", "title": "盯盘盒子：隐藏 / 显示" },
+      { "command": "stockWatch.refresh", "title": "刷新行情", "icon": "$(refresh)" },
+      { "command": "stockWatch.addGroup", "title": "添加分类", "icon": "$(new-folder)" },
+      { "command": "stockWatch.addStock", "title": "添加股票 / 指数 / 场内基金", "icon": "$(add)" },
+      { "command": "stockWatch.position", "title": "添加 / 修改持仓" },
+      { "command": "stockWatch.clearPosition", "title": "清空持仓" },
+      { "command": "stockWatch.move", "title": "移至其他分类" },
+      { "command": "stockWatch.remove", "title": "从分类移除" },
+      { "command": "stockWatch.renameGroup", "title": "重命名分类" },
+      { "command": "stockWatch.deleteGroup", "title": "删除分类" }
+    ],
+    "keybindings": [{ "command": "stockWatch.toggleVisibility", "key": "alt+q", "mac": "alt+q" }],
+    "menus": {
+      "view/title": [{ "command": "stockWatch.refresh", "when": "view == stockWatch.board", "group": "navigation" }],
+      "webview/context": [
+        { "command": "stockWatch.position", "when": "webviewId == stockWatch.board && webviewSection == stock", "group": "1_position@1" },
+        { "command": "stockWatch.clearPosition", "when": "webviewId == stockWatch.board && webviewSection == stock", "group": "1_position@2" },
+        { "command": "stockWatch.move", "when": "webviewId == stockWatch.board && webviewSection == stock", "group": "2_organize@1" },
+        { "command": "stockWatch.remove", "when": "webviewId == stockWatch.board && webviewSection == stock", "group": "2_organize@2" },
+        { "command": "stockWatch.addStock", "when": "webviewId == stockWatch.board && webviewSection == group", "group": "1_group@1" },
+        { "command": "stockWatch.renameGroup", "when": "webviewId == stockWatch.board && webviewSection == group", "group": "1_group@2" },
+        { "command": "stockWatch.deleteGroup", "when": "webviewId == stockWatch.board && webviewSection == group", "group": "2_group@1" }
+      ],
+      "commandPalette": [
+        { "command": "stockWatch.position", "when": "false" }, { "command": "stockWatch.clearPosition", "when": "false" },
+        { "command": "stockWatch.move", "when": "false" }, { "command": "stockWatch.remove", "when": "false" },
+        { "command": "stockWatch.renameGroup", "when": "false" }, { "command": "stockWatch.deleteGroup", "when": "false" }
+      ]
+    },
+    "configuration": { "title": "盯盘盒子", "properties": {
+      "stockWatch.refreshSeconds": { "type": "number", "default": 5, "minimum": 5, "maximum": 60, "description": "侧栏可见时的行情刷新间隔（秒）。隐藏时暂停。" }
+    } }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "check": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "test:host": "node scripts/test-host.cjs",
+    "package": "vsce package --no-dependencies --allow-missing-repository --out stock-watch-box-0.1.13.vsix"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0", "@types/vscode": "1.90.0", "@vscode/vsce": "^3.6.0", "esbuild": "^0.25.0", "tsx": "^4.20.0", "typescript": "^5.8.0"
+  }
+}
