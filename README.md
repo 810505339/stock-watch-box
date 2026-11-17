@@ -42,7 +42,7 @@
 
 发布新版本时，更新 `package.json`、`package-lock.json` 和打包命令中的版本号，再推送同版本的 `v` 标签（例如 `v0.1.14`）。工作流会自动创建 GitHub Release 并附上安装包。
 
-GitHub Release 中的 VSIX 需要手动安装；当前插件不会读取 GitHub 源码或自动替换本地代码。要通过 VS Code 自动更新，需要使用真实 Marketplace Publisher ID 发布新版本，并开启 VS Code 扩展自动更新。当前 `local-stock-watch` 是本地占位 ID，尚未完成商店发布；正式确定发布者后需同步修改此字段。
+GitHub Release 中的 VSIX 需要手动安装；当前插件不会读取 GitHub 源码或自动替换本地代码。要通过 VS Code 自动更新，需要使用真实 Marketplace Publisher ID 发布新版本，并开启 VS Code 扩展自动更新。Marketplace 发布者 ID 为 `local-stock-watch`；GitHub 工作流目前自动打包，商店版本需另行发布。
 
 需要 Node.js 20+ 和 npm，VS Code 1.90+。
 
