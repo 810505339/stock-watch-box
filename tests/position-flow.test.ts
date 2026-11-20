@@ -211,6 +211,25 @@ test('原生持仓命令只打开内嵌表单，不启动输入框、不改变�
   assert.deepEqual(harness.api.getSnapshot().state.positions, {});
 });
 
+test('保存外观并关闭金银后，重启仍保留设置与既有持仓', async t => {
+  const memory = new Memory();
+  const first = activateHarness(memory);
+  await first.save({ quantity: '100', cost: '3.125' });
+  const original = first.api.getSnapshot().state;
+  first.emit({ type: 'saveSettings', settings: { fontSize: 18, theme: 'light', title: '行情', gold: false, silver: false } });
+  await tick();
+  assert.ok(first.messages.some(message => message.type === 'settingsSaved'));
+  first.dispose();
+  const restarted = activateHarness(memory);
+  t.after(() => restarted.dispose());
+  const snapshot = restarted.api.getSnapshot();
+  assert.deepEqual(snapshot.state, original);
+  assert.deepEqual(snapshot.markets.map(item => item.code), ['000001', '399006', '000688']);
+  assert.equal(snapshot.preferences.fontSize, 18);
+  assert.equal(snapshot.preferences.theme, 'light');
+  assert.equal(snapshot.preferences.title, '行情');
+});
+
 test('保存后重新激活扩展，从同一 Memento 恢复完整持仓', async t => {
   const memory = new Memory();
   const first = activateHarness(memory);

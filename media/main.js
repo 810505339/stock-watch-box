@@ -23,6 +23,8 @@
     chevron: 'm6 3 5 5-5 5',
     more: 'M3 8h.01M8 8h.01M13 8h.01',
     chart: 'M2 12V4m0 8h12M5 9l3-4 3 2 3-5',
+    settings: 'M2 4h12M2 8h12M2 12h12M5 2v4m5 0v4m-4 0v4',
+    candles: 'M4 2v3m0 6v3M2 5h4v6H2zM10 2v2m0 5v5M8 4h4v5H8z',
     up: 'M8 13V3m-4 4 4-4 4 4',
     down: 'M8 3v10m-4-4 4 4 4-4',
     flat: 'M3 8h10',
@@ -99,6 +101,8 @@
 
   function acceptDrop(event, target, element, className) {
     if (!validDrag(event) || dragState.kind !== target.kind) return;
+    if (target.beforeId === 'market') return;
+    if (target.kind === 'stock' && !manualSort(target.groupId)) return;
     event.preventDefault();
     event.stopPropagation();
     event.dataTransfer.dropEffect = 'move';
@@ -110,6 +114,8 @@
 
   function performDrop(event, target) {
     if (!validDrag(event, true) || dragState.kind !== target.kind) return;
+    if (target.beforeId === 'market') return;
+    if (target.kind === 'stock' && !manualSort(target.groupId)) return;
     event.preventDefault();
     event.stopPropagation();
     const source = dragState;
@@ -239,12 +245,139 @@
   }
 
   const heading = node('div', 'heading');
+  const identity = node('div', 'custom-identity');
+  const customIcon = node('span', 'custom-icon');
+  const customTitle = node('span', 'custom-title');
+  identity.append(customIcon, customTitle);
   const actions = node('div', 'header-actions');
   const refreshButton = button('刷新行情', 'refresh', () => post('refresh'));
   const createGroupButton = button('新建分类', 'plus', () => post('addGroup'));
-  actions.append(refreshButton, createGroupButton);
-  heading.append(actions);
+  const settingsButton = button('设置', 'settings', () => openSettings());
+  actions.append(refreshButton, createGroupButton, settingsButton);
+  heading.append(identity, actions);
   header.append(heading);
+
+  const settingsDialog = node('dialog', 'position-dialog settings-dialog');
+  const settingsForm = node('form', 'position-form');
+  const settingsTitle = node('h2', 'position-heading', '盯盘设置');
+  settingsTitle.id = 'stock-settings-title';
+  settingsDialog.setAttribute('aria-labelledby', settingsTitle.id);
+  settingsForm.append(settingsTitle);
+  settingsDialog.append(settingsForm);
+  document.body.append(settingsDialog);
+  const fields = {};
+  function setting(label, key, type, options) {
+    const field = node('label', 'position-field settings-field', label);
+    const control = node(options ? 'select' : 'input', type === 'checkbox' ? '' : 'position-input');
+    if (options) {
+      for (const [value, name] of options) {
+        const option = node('option', '', name);
+        option.value = value;
+        control.append(option);
+      }
+    } else control.type = type;
+    field.append(control);
+    settingsForm.append(field);
+    fields[key] = control;
+    return control;
+  }
+  const font = setting('字号（px）', 'fontSize', 'number');
+  font.min = 8; font.max = 20; font.required = true;
+  setting('主题', 'theme', '', [['system', '跟随 VS Code'], ['light', '浅色'], ['dark', '深色']]);
+  for (const [key, label] of [['up', '上涨颜色'], ['down', '下跌颜色']]) {
+    const input = setting(`${label}（留空跟随主题）`, key, 'text');
+    input.placeholder = '#ad8b8e';
+    input.pattern = '#[0-9a-fA-F]{6}';
+  }
+  setting('面板标题', 'title', 'text').maxLength = 40;
+  const iconField = setting('图标', 'icon', '', [['none', '无'], ['activity', '趋势'], ['candles', 'K 线'], ['png', '本地 PNG']]);
+  const choosePng = textButton('选择 PNG', null, () => post('chooseIcon'));
+  settingsForm.append(choosePng);
+  setting('显示伦敦金', 'gold', 'checkbox');
+  setting('显示伦敦银', 'silver', 'checkbox');
+  const settingsError = node('p', 'settings-error');
+  settingsError.setAttribute('role', 'alert');
+  const settingsActions = node('div', 'position-actions');
+  const restoreSettings = textButton('恢复默认', null, () => {
+    fillSettings({ fontSize: 8, theme: 'system', up: '', down: '', title: '', icon: 'none', png: '', gold: true, silver: true });
+    previewSettings();
+  });
+  const cancelSettings = textButton('取消', null, () => settingsDialog.close());
+  const submitSettings = node('button', 'text-button', '保存');
+  submitSettings.type = 'submit';
+  settingsActions.append(restoreSettings, cancelSettings, submitSettings);
+  settingsForm.append(settingsError, settingsActions);
+  let png = '';
+  let displayedIcon = '';
+  let savingSettings = false;
+  function fillSettings(settings) {
+    png = settings.png;
+    for (const [key, control] of Object.entries(fields)) {
+      if (control.type === 'checkbox') control.checked = settings[key];
+      else control.value = settings[key];
+    }
+  }
+  function readSettings() {
+    return { ...Object.fromEntries(Object.entries(fields).map(([key, control]) =>
+      [key, control.type === 'checkbox' ? control.checked : control.value])),
+    fontSize: Math.max(8, Math.min(20, Number(font.value) || 8)), png };
+  }
+  function applySettings(settings) {
+    if (!settings) return;
+    window.applyStockAppearance(settings);
+    setText(customTitle, settings.title);
+    customTitle.title = settings.title;
+    const nextIcon = settings.icon === 'png' ? settings.png : settings.icon;
+    if (nextIcon === displayedIcon) return;
+    displayedIcon = nextIcon;
+    customIcon.replaceChildren();
+    if (settings.icon === 'png' && settings.png) {
+      const image = node('img');
+      image.alt = '';
+      image.src = `data:image/png;base64,${settings.png}`;
+      customIcon.append(image);
+    } else if (settings.icon === 'activity' || settings.icon === 'candles') {
+      customIcon.append(icon(settings.icon === 'activity' ? 'chart' : 'candles'));
+    }
+  }
+  function previewSettings() {
+    choosePng.hidden = iconField.value !== 'png';
+    const settings = readSettings();
+    applySettings(settings);
+    previewMetalRows(settings);
+  }
+  function previewMetalRows(settings) {
+    const rows = groupViews.get('market')?.rows;
+    for (const [id, visible] of [['hf_XAU', settings.gold], ['hf_XAG', settings.silver]]) {
+      const row = rows?.get(id);
+      if (row) row.article.hidden = !visible;
+    }
+  }
+  function openSettings() {
+    if (!snapshot?.preferences || settingsDialog.open) return;
+    fillSettings(snapshot.preferences);
+    setText(settingsError, '');
+    previewSettings();
+    settingsDialog.showModal();
+  }
+  settingsForm.addEventListener('input', previewSettings);
+  settingsForm.addEventListener('submit', event => {
+    event.preventDefault();
+    if (savingSettings) return;
+    const settings = readSettings();
+    if (settings.icon === 'png' && !settings.png) {
+      setText(settingsError, '请先选择 PNG 图标');
+      return;
+    }
+    savingSettings = true;
+    submitSettings.disabled = true;
+    post('saveSettings', { settings });
+  });
+  settingsDialog.addEventListener('close', () => {
+    if (!snapshot?.preferences) return;
+    applySettings(snapshot.preferences);
+    previewMetalRows(snapshot.preferences);
+  });
 
   function createSummary(currency) {
     const card = node('article', `summary-card currency-${currency.toLowerCase()}`);
@@ -484,7 +617,7 @@
       updateCollapsed(view);
       persist();
     }, 'group-toggle');
-    toggle.draggable = true;
+    toggle.draggable = group.id !== 'market';
     toggle.addEventListener('dragstart', event => beginDrag(event, { kind: 'group', groupId: group.id }, toggle));
     toggle.addEventListener('dragend', finishDrag);
     groupHeader.addEventListener('dragover', event => {
@@ -499,6 +632,11 @@
     const add = button('添加股票 / 场内基金', 'plus', () => post('addStock', { groupId: group.id }));
     const menu = button('分类操作', 'more', () => post('groupMenu', { groupId: group.id }));
     groupHeader.append(toggle, add, menu);
+    if (group.id === 'market') {
+      groupHeader.removeAttribute('data-vscode-context');
+      add.hidden = true;
+      menu.hidden = true;
+    }
     const body = node('div', 'group-body');
     const stockList = node('div', 'stock-list');
     const addFirst = textButton('添加股票或基金', 'plus', () => post('addStock', { groupId: group.id }), 'group-empty');
@@ -528,30 +666,45 @@
   }
 
   function createStock(groupId, symbol) {
+    const market = groupId === 'market';
     const key = JSON.stringify([groupId, symbol]);
     const article = node('article', 'stock');
-    article.setAttribute('data-vscode-context', JSON.stringify({
+    if (!market) article.setAttribute('data-vscode-context', JSON.stringify({
       webviewSection: 'stock', symbol, groupId, preventDefaultContextMenuItems: true
     }));
+    let wasExpanded = false;
+    const openDetail = () => post('openDetail', { groupId, symbol });
     const main = button('展开股票详情', null, event => {
       if (suppressDragClick(event)) return;
+      if (event.detail > 1) return;
+      wasExpanded = expanded.has(key);
       if (expanded.has(key)) expanded.delete(key);
       else expanded.add(key);
       updateExpanded(view);
       persist();
     }, 'stock-main');
-    main.draggable = true;
+    main.addEventListener('dblclick', event => {
+      if (suppressDragClick(event)) return;
+      if (wasExpanded) expanded.add(key);
+      else expanded.delete(key);
+      updateExpanded(view);
+      persist();
+      openDetail();
+    });
+    main.draggable = !market;
     main.addEventListener('dragstart', event => beginDrag(event, { kind: 'stock', groupId, symbol }, main));
     main.addEventListener('dragend', finishDrag);
     article.addEventListener('dragover', event => acceptDrop(event,
       { kind: 'stock', groupId, beforeSymbol: symbol }, article, 'drop-before'));
     article.addEventListener('drop', event => performDrop(event, { kind: 'stock', groupId, beforeSymbol: symbol }));
     main.addEventListener('contextmenu', event => {
+      if (market) return;
       event.preventDefault();
       event.stopPropagation();
       openPosition(groupId, symbol, main);
     });
     main.addEventListener('keydown', event => {
+      if (market) return;
       if ((event.key === 'F10' && event.shiftKey) || event.key === 'ContextMenu') {
         event.preventDefault();
         event.stopPropagation();
@@ -591,10 +744,11 @@
     const time = node('div', 'quote-time');
     const source = node('div', 'quote-source');
     const positionNote = node('div', 'position-note', '日盈亏按现有数量与昨收估算，不含交易和费用。');
-    details.append(quoteHeader, detailGrid, positionButton, time, source, positionNote);
+    const chartButton = textButton('查看图表', 'chart', openDetail);
+    details.append(quoteHeader, detailGrid, positionButton, chartButton, time, source, positionNote);
     article.append(main, details);
     const view = { key, article, main, name, code, fund, stale, price, priceDetail, change, arrow, changeText,
-      pnl, pnlTitle, pnlValue, details, fields, positionButton, time, source, positionNote, direction: '', fullName: '' };
+      pnl, pnlTitle, pnlValue, details, fields, positionButton, chartButton, time, source, positionNote, market, direction: '', fullName: '' };
     return view;
   }
 
@@ -603,7 +757,7 @@
     view.details.hidden = !open;
     view.main.setAttribute('aria-expanded', String(open));
     view.main.setAttribute('aria-label', `${view.changeText.textContent}，${view.fullName}，${view.code.textContent}，${open ? '收起' : '展开'}详情`);
-    view.main.title = `${view.tooltip || view.fullName}\n点击${open ? '收起' : '展开'}详情；右键${view.isIndex ? '管理指数' : '管理持仓'}`;
+    view.main.title = `${view.tooltip || view.fullName}\n点击${open ? '收起' : '展开'}摘要，双击打开详情`;
     view.article.classList.toggle('expanded', open);
   }
 
@@ -613,17 +767,17 @@
     view.isIndex = security.kind === 'index';
     const quote = data.quotes[symbol];
     const metrics = data.metrics[symbol];
-    const position = security.kind === 'index' ? undefined : data.state.positions[symbol];
-    const currency = quote?.currency || security.currency;
+    const position = view.market || security.kind === 'index' ? undefined : data.state.positions[symbol];
+    const currency = security.kind === 'metal' ? '美元／金衡盎司' : quote?.currency || security.currency;
     const market = { sh: '沪', sz: '深', bj: '北', hk: '港' }[security.market] || '';
     const priceDecimals = security.market === 'hk' || security.kind === 'fund' ? 3 : 2;
     view.fullName = quote?.name || security.name;
-    setText(view.name, shortSecurityName(view.fullName, security));
+    setText(view.name, view.market ? security.name : shortSecurityName(view.fullName, security));
     view.name.title = view.fullName;
     setText(view.code, security.code);
     view.code.title = `${market} ${security.code} · ${currency}`;
     view.fund.hidden = security.kind === 'stock';
-    setText(view.fund, security.kind === 'index' ? '指数' : '场内基金');
+    setText(view.fund, security.kind === 'metal' ? currency : security.kind === 'index' ? '指数' : '场内基金');
     view.fund.title = view.fund.textContent;
     const historical = Boolean(quote) && quote.date !== data.today;
     view.stale.hidden = Boolean(quote) && !quote.stale && !historical;
@@ -661,7 +815,11 @@
     tone(view.fields.profit, metrics?.profit);
     tone(view.fields.profitPercent, metrics?.profitPercent);
     const positionLabel = position ? '修改持仓' : '添加持仓';
-    view.positionButton.hidden = security.kind === 'index';
+    view.positionButton.hidden = view.market || security.kind === 'index';
+    const chartLabel = security.kind === 'metal' ? '查看报价详情' : '查看图表';
+    setText(view.chartButton.lastElementChild, chartLabel);
+    view.chartButton.setAttribute('aria-label', chartLabel);
+    view.chartButton.title = chartLabel;
     setText(view.positionButton.lastElementChild, positionLabel);
     view.positionButton.title = positionLabel;
     view.positionButton.setAttribute('aria-label', `${positionLabel}：${view.fullName}`);
@@ -672,8 +830,15 @@
     updateExpanded(view);
   }
 
+  function manualSort(groupId) {
+    return groupId !== 'market' && !['asc', 'desc'].includes(snapshot?.sorts?.[groupId]);
+  }
+
   function reconcileGroups(data) {
-    const definitions = data.state.groups;
+    const market = { id: 'market', name: '市场行情', symbols: data.markets.map(item => item.id) };
+    const marketData = { ...data, state: { securities: Object.fromEntries(data.markets.map(item => [item.id, item])), positions: {} },
+      quotes: data.marketQuotes, metrics: {} };
+    const definitions = [market, ...data.state.groups];
     const ids = new Set(definitions.map(group => group.id));
     for (const [id, view] of groupViews) {
       if (!ids.has(id)) {
@@ -686,11 +851,13 @@
       if (groupList.children[index] !== view.section) groupList.insertBefore(view.section, groupList.children[index] || null);
       setText(view.name, group.name);
       view.name.title = group.name;
-      setText(view.count, `${group.symbols.length}/10`);
+      const isMarket = group.id === 'market';
+      const order = data.sorts[group.id];
+      setText(view.count, isMarket ? '' : `${group.symbols.length}/10${order === 'asc' ? ' ↑' : order === 'desc' ? ' ↓' : ''}`);
       view.add.disabled = group.symbols.length >= 10;
       view.add.title = view.add.disabled ? '分类已满（最多 10 只）' : `添加股票 / 场内基金到 ${group.name}`;
       view.add.setAttribute('aria-label', view.add.title);
-      view.addFirst.hidden = group.symbols.length > 0;
+      view.addFirst.hidden = isMarket || group.symbols.length > 0;
       updateCollapsed(view);
       const symbols = new Set(group.symbols);
       for (const [symbol, row] of view.rows) {
@@ -699,18 +866,27 @@
           view.rows.delete(symbol);
         }
       }
-      group.symbols.forEach((symbol, stockIndex) => {
+      const ordered = [...group.symbols];
+      if (!isMarket && !manualSort(group.id)) ordered.sort((a, b) => {
+        const x = data.quotes[a]?.changePercent;
+        const y = data.quotes[b]?.changePercent;
+        if (!finite(x)) return finite(y) ? 1 : 0;
+        if (!finite(y)) return -1;
+        return order === 'asc' ? x - y : y - x;
+      });
+      ordered.forEach((symbol, stockIndex) => {
         let row = view.rows.get(symbol);
         if (!row) {
           row = createStock(group.id, symbol);
           view.rows.set(symbol, row);
         }
         if (view.stockList.children[stockIndex] !== row.article) view.stockList.insertBefore(row.article, view.stockList.children[stockIndex] || null);
-        updateStock(row, symbol, data);
+        row.main.draggable = manualSort(group.id);
+        updateStock(row, symbol, isMarket ? marketData : data);
       });
     });
-    empty.hidden = definitions.length > 0;
-    setText(listCount, `${definitions.length} 个分类`);
+    empty.hidden = data.state.groups.length > 0;
+    setText(listCount, `${data.state.groups.length} 个分类`);
   }
 
   function updateSummary(data) {
@@ -746,6 +922,7 @@
     if (!data?.state || !Array.isArray(data.state.groups) || !Array.isArray(data.summaries)) return;
     const first = !snapshot;
     snapshot = data;
+    if (!settingsDialog.open) applySettings(data.preferences);
     updateSummary(data);
     reconcileGroups(data);
     refreshButton.disabled = data.refreshing;
@@ -762,8 +939,9 @@
     }
     setText(updated, time ? `获取于 ${time}` : '');
     updated.title = '最近一次获取时间（UTC+8）；证券报价时间见详情';
-    errorText.hidden = !data.error;
-    setText(errorText, data.error || '');
+    const errors = [data.error, data.marketError].filter(Boolean).join('。');
+    errorText.hidden = !errors;
+    setText(errorText, errors);
     setText(footerHint, Object.values(data.state.securities).some(security => security.market === 'hk')
       ? '港股行情可能延迟 · 右键股票管理持仓' : '右键股票管理持仓 · 数据仅供参考');
     if (first && finite(saved.scrollTop)) groups.scrollTop = saved.scrollTop;
@@ -798,6 +976,16 @@
     if (message?.type === 'snapshot') render(message.payload);
     else if (message?.type === 'openPosition') openPosition(message.groupId, message.symbol);
     else if (message?.type === 'positionResult') receivePositionResult(message);
+    else if (message?.type === 'iconSelected' && settingsDialog.open) {
+      png = message.png;
+      setText(settingsError, '');
+      previewSettings();
+    } else if (message?.type === 'settingsSaved' || message?.type === 'settingsError') {
+      savingSettings = false;
+      submitSettings.disabled = false;
+      if (message.type === 'settingsSaved') settingsDialog.close();
+      else setText(settingsError, message.error);
+    }
   });
   post('ready');
 })();

@@ -1,4 +1,4 @@
-import type { Currency, Market, Quote, Security } from './types';
+import type { Currency, Market, MarketInstrument, MarketQuote, Quote, Security } from './types';
 
 const QUOTE_URL = 'https://qt.gtimg.cn/q=';
 const SEARCH_URL = 'https://smartbox.gtimg.cn/s3/?t=all&q=';
@@ -126,7 +126,7 @@ export function parseSearchResponse(text: string): Security[] {
   return result;
 }
 
-async function requestText(url: string, signal?: AbortSignal): Promise<string> {
+export async function requestText(url: string, signal?: AbortSignal, encoding = 'gb18030'): Promise<string> {
   if (signal?.aborted) throw new Error('请求已取消');
   const controller = new AbortController();
   const cancel = () => controller.abort();
@@ -138,7 +138,7 @@ async function requestText(url: string, signal?: AbortSignal): Promise<string> {
       headers: { Referer: 'https://stockapp.finance.qq.com/' },
     });
     if (!response.ok) throw new Error(`腾讯行情请求失败（HTTP ${response.status}）`);
-    return new TextDecoder('gb18030').decode(await response.arrayBuffer());
+    return new TextDecoder(encoding).decode(await response.arrayBuffer());
   } catch (error) {
     if (signal?.aborted) throw new Error('请求已取消');
     if (controller.signal.aborted) throw new Error('腾讯行情请求超时，请稍后重试');
@@ -174,6 +174,37 @@ export async function fetchQuotes(securities: Security[], signal?: AbortSignal):
   const ids = new Set(securities.map(security => security.id));
   const result = parseTencentQuotes(await requestQuotes([...ids], signal));
   return Object.fromEntries(Object.entries(result).filter(([id]) => ids.has(id)));
+}
+
+export const MARKET_INSTRUMENTS: readonly MarketInstrument[] = [
+  { id: 'sh000001', code: '000001', name: '上证指数', market: 'sh', kind: 'index', currency: 'CNY' },
+  { id: 'sz399006', code: '399006', name: '创业板指', market: 'sz', kind: 'index', currency: 'CNY' },
+  { id: 'sh000688', code: '000688', name: '科创50', market: 'sh', kind: 'index', currency: 'CNY' },
+  { id: 'hf_XAU', code: 'XAU', name: '伦敦金', market: 'london', kind: 'metal', currency: 'USD' },
+  { id: 'hf_XAG', code: 'XAG', name: '伦敦银', market: 'london', kind: 'metal', currency: 'USD' },
+];
+
+export function parseMetalQuotes(text: string, fetchedAt = Date.now()): Record<string, MarketQuote> {
+  const result: Record<string, MarketQuote> = {};
+  for (const match of text.matchAll(/(?:^|[;\r\n])\s*v_(hf_XAU|hf_XAG)="([^"\r\n]*)"/g)) {
+    const [, id, record] = match;
+    const fields = record.split(',');
+    const price = numeric(fields[0], true);
+    const previousClose = numeric(fields[7], true);
+    const change = price !== null && previousClose !== null ? price - previousClose : null;
+    result[id] = {
+      id, name: id === 'hf_XAU' ? '伦敦金' : '伦敦银', currency: 'USD', price, previousClose, change,
+      changePercent: numeric(fields[1]) ?? (change !== null && previousClose ? change / previousClose * 100 : null),
+      ...parseQuoteTime(`${fields[12] ?? ''}${fields[6] ?? ''}`), fetchedAt,
+    };
+  }
+  return result;
+}
+
+export async function fetchMarketMetals(instruments: readonly MarketInstrument[], signal?: AbortSignal): Promise<Record<string, MarketQuote>> {
+  const ids = MARKET_INSTRUMENTS.filter(item => item.kind === 'metal' && instruments.some(active => active.id === item.id))
+    .map(item => item.id);
+  return ids.length ? parseMetalQuotes(await requestText(QUOTE_URL + ids.join(','), signal)) : {};
 }
 
 export async function searchSecurities(query: string, signal?: AbortSignal): Promise<Security[]> {

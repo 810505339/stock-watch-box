@@ -1,11 +1,15 @@
 import * as vscode from 'vscode';
-import { randomBytes } from 'node:crypto';
-import type { Group, PortfolioState, Quote, Security, Snapshot } from './types';
+import { createHash, randomBytes } from 'node:crypto';
+import type { Group, MarketQuote, PortfolioState, Quote, Security, Snapshot } from './types';
 import * as domain from './portfolio';
-import { fetchQuotes, searchSecurities } from './quotes';
+import { fetchMarketMetals, fetchQuotes, MARKET_INSTRUMENTS, searchSecurities } from './quotes';
 import { parsePositionInput } from './position-input';
+import { isPng, MAX_ICON_BYTES, preferences, type Preferences, type SortOrder } from './preferences';
+import { DetailViews } from './detail-view';
 
 const STORAGE_KEY = 'portfolio.v1';
+const PREFERENCES_KEY = 'appearance.v1';
+const SORTS_KEY = 'groupSorts.v1';
 interface RowContext { groupId: string; symbol: string; }
 interface SearchItem extends vscode.QuickPickItem { security?: Security; }
 
@@ -13,6 +17,11 @@ class Board implements vscode.WebviewViewProvider, vscode.Disposable {
   private view?: vscode.WebviewView;
   private state: PortfolioState;
   private quotes: Record<string, Quote> = {};
+  private metals: Record<string, MarketQuote> = {};
+  private marketError = '';
+  private settings: Preferences;
+  private sorts: Record<string, SortOrder>;
+  private readonly details: DetailViews;
   private error = '';
   private updatedAt: number | null = null;
   private refreshing = false;
@@ -22,8 +31,19 @@ class Board implements vscode.WebviewViewProvider, vscode.Disposable {
   private disposed = false;
   private editing = false;
   private toggling = false;
+  private refreshAgain = false;
   private readonly subscriptions: vscode.Disposable[] = [];
   constructor(private readonly context: vscode.ExtensionContext, private readonly log: vscode.OutputChannel) {
+    this.settings = preferences(context.globalState.get(PREFERENCES_KEY));
+    this.sorts = context.globalState.get<Record<string, SortOrder>>(SORTS_KEY) ?? {};
+    this.details = new DetailViews(context, id => {
+      const instrument = this.state.securities[id] ?? this.markets().find(item => item.id === id);
+      if (!instrument) return undefined;
+      const position = this.state.positions[id];
+      const quote = this.quotes[id];
+      return { instrument, quote: quote ?? this.metals[id], position,
+        metrics: position ? domain.positionMetrics(position, quote) : undefined };
+    }, () => this.settings, () => this.detailIcon(), () => this.updateRefreshVisibility());
     const raw = context.globalState.get<unknown>(STORAGE_KEY);
     try { this.state = raw === undefined ? domain.createInitialState() : domain.validateState(raw); }
     catch {
@@ -36,12 +56,73 @@ class Board implements vscode.WebviewViewProvider, vscode.Disposable {
     }));
   }
 
+  private markets() {
+    return MARKET_INSTRUMENTS.filter(item => item.code === 'XAU' ? this.settings.gold :
+      item.code === 'XAG' ? this.settings.silver : true);
+  }
+
+  private detailIcon(): vscode.Uri | undefined {
+    const { icon, png } = this.settings;
+    if (icon === 'png') return this.pngUri(png);
+    if (icon === 'none') return undefined;
+    return vscode.Uri.joinPath(this.context.extensionUri, 'media', icon === 'candles' ? 'candles.svg' : 'activity.svg');
+  }
+
+  private pngUri(png: string): vscode.Uri {
+    const hash = createHash('sha256').update(png).digest('hex');
+    return vscode.Uri.joinPath(this.context.globalStorageUri, `icon-${hash}.png`);
+  }
+
+  private async chooseIcon(): Promise<void> {
+    try {
+      const [uri] = await vscode.window.showOpenDialog({ canSelectMany: false, filters: { PNG: ['png'] },
+        openLabel: '选用 PNG 图标' }) ?? [];
+      if (!uri) return;
+      const info = await vscode.workspace.fs.stat(uri);
+      if (info.size > MAX_ICON_BYTES) throw new Error('PNG 图标须小于或等于 128 KB');
+      const bytes = await vscode.workspace.fs.readFile(uri);
+      if (!isPng(bytes)) throw new Error('请选择边长不超过 512 px 的 PNG 图标');
+      void this.view?.webview.postMessage({ type: 'iconSelected', png: Buffer.from(bytes).toString('base64') });
+    } catch (error) {
+      void this.view?.webview.postMessage({ type: 'settingsError', error: error instanceof Error ? error.message : '无法读取图标' });
+    }
+  }
+
+  private async saveSettings(raw: unknown): Promise<void> {
+    const next = preferences(raw);
+    try {
+      if (next.icon === 'png' && (next.png !== this.settings.png || this.settings.icon !== 'png')) {
+        await vscode.workspace.fs.createDirectory(this.context.globalStorageUri);
+        await vscode.workspace.fs.writeFile(this.pngUri(next.png), Buffer.from(next.png, 'base64'));
+      }
+      const previousIcon = this.settings.icon === 'png' ? this.pngUri(this.settings.png) : undefined;
+      const changed = next.gold !== this.settings.gold || next.silver !== this.settings.silver;
+      await this.context.globalState.update(PREFERENCES_KEY, next);
+      this.settings = next;
+      if (previousIcon && (next.icon !== 'png' || previousIcon.toString() !== this.pngUri(next.png).toString())) {
+        void Promise.resolve(vscode.workspace.fs.delete(previousIcon, { useTrash: false })).catch(() => {});
+      }
+      if (changed) {
+        if (!next.gold) delete this.metals.hf_XAU;
+        if (!next.silver) delete this.metals.hf_XAG;
+        this.marketError = '';
+        this.request?.abort();
+        this.refreshAgain = true;
+      }
+      this.publish();
+      void this.view?.webview.postMessage({ type: 'settingsSaved' });
+      if (changed && this.marketVisible && !this.refreshing) void this.refresh();
+    } catch {
+      void this.view?.webview.postMessage({ type: 'settingsError', error: '设置保存失败，请重试' });
+    }
+  }
+
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
     view.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'media')] };
     const nonce = randomBytes(18).toString('hex');
     const resource = (file: string) => view.webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', file));
-    view.webview.html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${view.webview.cspSource}; script-src 'nonce-${nonce}'; img-src ${view.webview.cspSource};"><link rel="stylesheet" href="${resource('main.css')}"><title>盯盘盒子</title></head><body><main id="app"><header id="header"></header><section id="summary" aria-label="持仓总览"></section><section id="groups" aria-label="自选分类"></section><footer id="footer"></footer></main><script nonce="${nonce}" src="${resource('main.js')}"></script></body></html>`;
+    view.webview.html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${view.webview.cspSource}; script-src 'nonce-${nonce}'; img-src ${view.webview.cspSource} data:;"><link rel="stylesheet" href="${resource('main.css')}"><title>盯盘盒子</title></head><body><main id="app"><header id="header"></header><section id="summary" aria-label="持仓总览"></section><section id="groups" aria-label="自选分类"></section><footer id="footer"></footer></main><script nonce="${nonce}" src="${resource('appearance.js')}"></script><script nonce="${nonce}" src="${resource('main.js')}"></script></body></html>`;
     const listener = view.webview.onDidReceiveMessage((message: unknown) => {
       if (!message || typeof message !== 'object') return;
       const m = message as Record<string, unknown>;
@@ -51,6 +132,13 @@ class Board implements vscode.WebviewViewProvider, vscode.Disposable {
         case 'addGroup': void this.edit(() => this.addGroup()); break;
         case 'addStock': void this.edit(() => this.addStock(m)); break;
         case 'groupMenu': void this.edit(() => this.groupMenu(m)); break;
+        case 'chooseIcon': void this.chooseIcon(); break;
+        case 'saveSettings': void this.saveSettings(m.settings); break;
+        case 'openDetail': {
+          if (typeof m.symbol === 'string' && (this.rowFrom(m) ||
+              (m.groupId === 'market' && this.markets().some(item => item.id === m.symbol)))) this.details.open(m.symbol);
+          break;
+        }
         case 'position': void this.edit(() => this.position(m)); break;
         case 'savePosition': void this.savePosition(m); break;
         case 'clearPosition': void this.edit(() => this.clearPosition(m)); break;
@@ -63,17 +151,18 @@ class Board implements vscode.WebviewViewProvider, vscode.Disposable {
         }); break;
         case 'reorderStock': void this.edit(async () => {
           if (typeof m.fromGroupId !== 'string' || typeof m.toGroupId !== 'string' || typeof m.symbol !== 'string' || (m.beforeSymbol !== undefined && typeof m.beforeSymbol !== 'string')) throw new Error('自选排序参数无效。');
+          if ([m.fromGroupId, m.toGroupId].some(id => this.sorts[id] === 'asc' || this.sorts[id] === 'desc')) return;
           await this.save(domain.reorderSecurity(this.state, m.fromGroupId, m.toGroupId, m.symbol, m.beforeSymbol as string | undefined));
         }); break;
       }
     });
     const visibility = view.onDidChangeVisibility(() => {
-      if (view.visible) { this.publish(); void this.refresh(); }
-      else { this.stopTimer(); this.request?.abort(); }
+      if (view.visible) this.publish();
+      this.updateRefreshVisibility();
     });
     view.onDidDispose(() => {
       listener.dispose(); visibility.dispose();
-      if (this.view === view) { this.view = undefined; this.stopTimer(); this.request?.abort(); }
+      if (this.view === view) { this.view = undefined; this.updateRefreshVisibility(); }
     });
   }
 
@@ -84,10 +173,14 @@ class Board implements vscode.WebviewViewProvider, vscode.Disposable {
       metrics: Object.fromEntries(Object.entries(this.state.positions).map(([id, p]) => [id, domain.positionMetrics(p, this.quotes[id])])),
       summaries: domain.summarize(this.state, this.quotes, today),
       refreshing: this.refreshing, error: this.error, updatedAt: this.updatedAt, today,
+      markets: this.markets(), marketQuotes: { ...this.quotes, ...this.metals }, marketError: this.marketError,
+      preferences: this.settings, sorts: this.sorts,
     };
   }
   private publish(): void {
-    if (!this.disposed) void this.view?.webview.postMessage({ type: 'snapshot', payload: this.snapshot() });
+    if (this.disposed) return;
+    void this.view?.webview.postMessage({ type: 'snapshot', payload: this.snapshot() });
+    this.details.publish();
   }
   async toggleVisibility(): Promise<void> {
     if (this.toggling) return;
@@ -97,36 +190,68 @@ class Board implements vscode.WebviewViewProvider, vscode.Disposable {
     } finally { this.toggling = false; }
   }
   private stopTimer(): void { if (this.timer) clearTimeout(this.timer); this.timer = undefined; }
+  private get marketVisible(): boolean { return Boolean(this.view?.visible || this.details.visible); }
+  private updateRefreshVisibility(): void {
+    if (this.disposed) return;
+    if (this.marketVisible) {
+      if (this.request?.signal.aborted) this.refreshAgain = true;
+      else if (!this.refreshing && !this.timer) void this.refresh();
+    } else {
+      this.stopTimer();
+      this.request?.abort();
+    }
+  }
   private schedule(): void {
     this.stopTimer();
-    if (!this.view?.visible || this.disposed) return;
-    const configured = vscode.workspace.getConfiguration('stockWatch').get<number>('refreshSeconds', 5);
-    const seconds = Math.max(5, Math.min(60, Number.isFinite(configured) ? configured : 5));
-    this.timer = setTimeout(() => void this.refresh(), Math.min(60, seconds * 2 ** Math.min(this.failures, 4)) * 1000);
+    if (!this.marketVisible || this.disposed) return;
+    const configured = vscode.workspace.getConfiguration('stockWatch').get<number>('refreshSeconds', 1);
+    const seconds = Math.max(1, Math.min(60, Number.isFinite(configured) ? configured : 1));
+    const interval = Math.min(60, seconds * 2 ** Math.min(this.failures, 4)) * 1000;
+    const elapsed = Date.now() - (this.refreshStartedAt ?? 0);
+    this.timer = setTimeout(() => void this.refresh(), this.failures ? interval : Math.max(50, interval - elapsed));
   }
+  private refreshStartedAt?: number;
   async refresh(): Promise<void> {
     if (this.refreshing || this.disposed) return;
+    this.refreshAgain = false;
+    this.refreshStartedAt = Date.now();
     this.stopTimer();
-    const securities = Object.values(this.state.securities);
-    if (!securities.length) { this.error = ''; this.publish(); this.schedule(); return; }
+    const markets = this.markets();
+    const indices = MARKET_INSTRUMENTS.filter(item => item.kind === 'index') as Security[];
+    const securities = [...Object.values(this.state.securities), ...indices];
     this.refreshing = true;
     const controller = new AbortController(); this.request = controller;
     this.publish();
     try {
-      const incoming = await fetchQuotes(securities, controller.signal);
+      const [stockResult, metalResult] = await Promise.allSettled([
+        fetchQuotes(securities, controller.signal), fetchMarketMetals(markets, controller.signal),
+      ]);
       if (controller.signal.aborted || this.disposed) return;
+      if (stockResult.status === 'rejected' && this.state.groups.length) {
+        this.log.appendLine(`行情请求失败：${String(stockResult.reason)}`);
+      }
+      const incoming = stockResult.status === 'fulfilled' ? stockResult.value : {};
       const missing: string[] = [];
-      for (const security of securities) {
-        if (!this.state.securities[security.id]) continue;
-        const q = incoming[security.id];
-        if (q && q.price !== null) this.quotes[security.id] = q;
+      const active = new Set([...Object.keys(this.state.securities), ...markets.map(item => item.id)]);
+      let marketMissing = 0;
+      for (const id of active) {
+        const metal = id.startsWith('hf_');
+        const cache = metal ? this.metals : this.quotes;
+        const q = metal ? (metalResult.status === 'fulfilled' ? metalResult.value[id] : undefined) : incoming[id];
+        if (q && q.price !== null) {
+          if (metal) this.metals[id] = q;
+          else if (q.currency !== 'USD') this.quotes[id] = { ...q, currency: q.currency };
+        }
         else {
-          missing.push(security.code);
-          if (this.quotes[security.id]) this.quotes[security.id] = { ...this.quotes[security.id], stale: true };
+          if (this.state.securities[id]) missing.push(id);
+          if (markets.some(item => item.id === id)) marketMissing++;
+          if (cache[id]) cache[id].stale = true;
         }
       }
+      this.marketError = marketMissing ? `${marketMissing} 项市场行情暂不可用，保留上次报价` : '';
       this.error = missing.length ? `${missing.length} 只证券暂无有效报价，保留上次数据` : '';
-      this.failures = missing.length ? this.failures + 1 : 0;
+      this.failures = stockResult.status === 'rejected' ||
+        (metalResult.status === 'rejected' && !Object.keys(incoming).length) ? this.failures + 1 : 0;
       this.updatedAt = Date.now();
     } catch (error) {
       if (!controller.signal.aborted) {
@@ -138,7 +263,9 @@ class Board implements vscode.WebviewViewProvider, vscode.Disposable {
     } finally {
       this.refreshing = false;
       if (this.request === controller) this.request = undefined;
-      this.publish(); this.schedule();
+      this.publish();
+      if (this.refreshAgain && this.marketVisible) void this.refresh();
+      else this.schedule();
     }
   }
 
@@ -152,7 +279,7 @@ class Board implements vscode.WebviewViewProvider, vscode.Disposable {
   private async save(next: PortfolioState): Promise<void> {
     await this.context.globalState.update(STORAGE_KEY, next);
     this.state = next;
-    for (const id of Object.keys(this.quotes)) if (!next.securities[id]) delete this.quotes[id];
+    for (const id of Object.keys(this.quotes)) if (!next.securities[id] && !MARKET_INSTRUMENTS.some(item => item.id === id)) delete this.quotes[id];
     this.publish();
   }
   private groupFrom(value: unknown): Group | undefined {
@@ -189,10 +316,24 @@ class Board implements vscode.WebviewViewProvider, vscode.Disposable {
     if (choice === '删除分类') await this.save(domain.removeGroup(this.state, group.id));
   }
   async groupMenu(value: unknown): Promise<void> {
-    if (!this.groupFrom(value)) return;
-    const choice = await vscode.window.showQuickPick(['重命名分类', '删除分类'], { placeHolder: '分类管理' });
-    if (choice === '重命名分类') await this.renameGroup(value);
-    if (choice === '删除分类') await this.deleteGroup(value);
+    const group = this.groupFrom(value);
+    if (!group) return;
+    const selected = this.sorts[group.id] ?? 'default';
+    const choices = [
+      { label: '默认顺序', sort: 'default' }, { label: '涨跌幅升序', sort: 'asc' }, { label: '涨跌幅降序', sort: 'desc' },
+      { label: '重命名分类' }, { label: '删除分类' },
+    ] as const;
+    const choice = await vscode.window.showQuickPick(choices.map(item => ({
+      ...item, description: 'sort' in item && item.sort === selected ? '当前顺序' : undefined,
+    })), { placeHolder: '分类管理' });
+    if (choice && 'sort' in choice && choice.sort) {
+      const next = { ...this.sorts, [group.id]: choice.sort };
+      await this.context.globalState.update(SORTS_KEY, next);
+      this.sorts = next;
+      this.publish();
+    }
+    if (choice?.label === '重命名分类') await this.renameGroup(value);
+    if (choice?.label === '删除分类') await this.deleteGroup(value);
   }
 
   async addStock(value?: unknown): Promise<void> {
@@ -289,6 +430,7 @@ class Board implements vscode.WebviewViewProvider, vscode.Disposable {
   }
   dispose(): void {
     this.disposed = true; this.stopTimer(); this.request?.abort();
+    this.details.dispose();
     this.subscriptions.forEach(item => item.dispose());
   }
 }

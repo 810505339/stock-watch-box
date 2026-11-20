@@ -1,2 +1,10 @@
 import { build } from 'esbuild';
-await build({entryPoints:['src/extension.ts'],bundle:true,platform:'node',format:'cjs',target:'node18',external:['vscode'],outfile:'dist/extension.js',sourcemap:true});
+import { copyFile } from 'node:fs/promises';
+
+await Promise.all([
+  build({ entryPoints: ['src/extension.ts'], bundle: true, platform: 'node', format: 'cjs',
+    target: 'node18', external: ['vscode'], outfile: 'dist/extension.js', sourcemap: true }),
+  build({ entryPoints: ['media/detail.js'], bundle: true, platform: 'browser', format: 'iife',
+    target: 'es2020', outfile: 'dist/detail.js', minify: true }),
+]);
+await copyFile('node_modules/lightweight-charts/LICENSE', 'dist/lightweight-charts-LICENSE.txt');

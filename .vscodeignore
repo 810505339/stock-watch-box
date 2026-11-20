@@ -10,5 +10,6 @@ node_modules/**
 tsconfig.json
 package-lock.json
 dist/*.map
+media/detail.js
 .gitignore
 *.png
