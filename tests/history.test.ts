@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { macd, parseHistory } from '../src/history';
+import { macd, parseHistory, parseIntraday } from '../src/history';
 import { fetchMarketMetals, MARKET_INSTRUMENTS, parseMetalQuotes } from '../src/quotes';
 
 test('Tencent K lines normalize OHLC field order and discard malformed candles', () => {
@@ -25,6 +25,17 @@ test('MACD uses EMA 12, EMA 26, signal EMA 9 and the doubled histogram', () => {
   const rounded = (number: number) => Number(number.toFixed(6));
   assert.deepEqual(result.slice(1).map(item => Object.values(item).map(rounded)),
     [[0.159544, 0.031909, 0.255271], [0.282725, 0.082072, 0.401306]]);
+});
+
+test('分时数据保留北京时间、昨收和每分钟成交量，跳过无效累计量', () => {
+  const id = 'sz159915';
+  const data = parseIntraday({ code: 0, data: { [id]: {
+    data: { date: '20261120', data: ['0932 2.24 160', '0930 2.26 100', '0931 2.25 130', '0933 2.25 2',
+      '0934 2.23 7', '2460 2.20 12'] }, qt: { [id]: ['', '', '', '', '2.308'] },
+  } } }, id);
+  assert.equal(data.previousClose, 2.308);
+  assert.equal(new Date(data.points[0].time * 1000).toISOString(), '2026-11-20T01:30:00.000Z');
+  assert.deepEqual(data.points.map(point => point.volume), [100, 30, 30, null, 5]);
 });
 
 test('London quotes use the spot symbols, dollar pricing and Tencent timestamp', async () => {

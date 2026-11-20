@@ -16,7 +16,7 @@ body {
   padding: 0;
   color: var(--muted);
   background: var(--surface);
-  font-family: var(--vscode-font-family, 'Segoe UI', sans-serif);
+  font-family: var(--stock-font-family, var(--vscode-font-family, 'Segoe UI', sans-serif));
   font-size: 10px;
   font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
@@ -165,6 +165,16 @@ button, article { -webkit-user-select: none; user-select: none; }
 .quote-badge { font-size: 9px; color: var(--muted); }
 
 .stock-details { padding: 8px 10px 12px; border: 0; background: transparent; }
+.inline-trend { margin: 7px 0; padding-top: 5px; border-top: 1px solid var(--line); }
+.trend-status, .trend-legend { font-size: 9px; line-height: 1.45; }
+.trend-legend { min-height: 1.45em; margin-bottom: 3px; }
+.trend-plot { width: 100%; height: 200px; }
+.trend-plot:focus-visible { outline: 1px solid var(--line); outline-offset: 2px; }
+.stock-chart-divider {
+  position: absolute; left: 10px; right: 10px; height: 1px;
+  background: var(--line); pointer-events: none;
+}
+.trend-credits { font-size: 8px; color: var(--muted); }
 .detail-quote { display: flex; align-items: baseline; gap: 6px; margin-bottom: 5px; }
 .detail-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 5px 9px; margin-bottom: 7px; }
 .detail-item dt { color: var(--muted); font-size: 9px; line-height: 14px; }

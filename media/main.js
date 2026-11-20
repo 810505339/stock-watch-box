@@ -16,6 +16,7 @@
   let dragState = null;
   let dropIndicator = null;
   let suppressClickUntil = 0;
+  let intradaySequence = 0;
 
   const paths = {
     plus: 'M8 3v10M3 8h10',
@@ -283,6 +284,7 @@
   }
   const font = setting('字号（px）', 'fontSize', 'number');
   font.min = 8; font.max = 20; font.required = true;
+  setting('字体', 'fontFamily', '', window.stockFontChoices);
   setting('主题', 'theme', '', [['system', '跟随 VS Code'], ['light', '浅色'], ['dark', '深色']]);
   for (const [key, label] of [['up', '上涨颜色'], ['down', '下跌颜色']]) {
     const input = setting(`${label}（留空跟随主题）`, key, 'text');
@@ -299,7 +301,7 @@
   settingsError.setAttribute('role', 'alert');
   const settingsActions = node('div', 'position-actions');
   const restoreSettings = textButton('恢复默认', null, () => {
-    fillSettings({ fontSize: 8, theme: 'system', up: '', down: '', title: '', icon: 'none', png: '', gold: true, silver: true });
+    fillSettings({ fontSize: 8, fontFamily: 'system', theme: 'system', up: '', down: '', title: '', icon: 'none', png: '', gold: true, silver: true });
     previewSettings();
   });
   const cancelSettings = textButton('取消', null, () => settingsDialog.close());
@@ -314,7 +316,7 @@
     png = settings.png;
     for (const [key, control] of Object.entries(fields)) {
       if (control.type === 'checkbox') control.checked = settings[key];
-      else control.value = settings[key];
+      else control.value = key === 'fontFamily' ? settings[key] ?? 'system' : settings[key];
     }
   }
   function readSettings() {
@@ -745,10 +747,23 @@
     const source = node('div', 'quote-source');
     const positionNote = node('div', 'position-note', '日盈亏按现有数量与昨收估算，不含交易和费用。');
     const chartButton = textButton('查看图表', 'chart', openDetail);
-    details.append(quoteHeader, detailGrid, positionButton, chartButton, time, source, positionNote);
+    const trend = node('section', 'inline-trend');
+    const trendStatus = node('p', 'trend-status', '分时 · 成交量 · MACD');
+    const trendLegend = node('p', 'trend-legend');
+    const trendPlot = node('div', 'trend-plot');
+    trendPlot.tabIndex = 0;
+    trendPlot.setAttribute('aria-label', '分时走势、成交量和 MACD，按左右键查看数据');
+    trendPlot.hidden = true;
+    const trendRetry = textButton('重试分时', null, () => requestTrend(view, true));
+    trendRetry.hidden = true;
+    const trendCredits = node('a', 'trend-credits', 'TradingView Lightweight Charts™');
+    trendCredits.href = 'https://www.tradingview.com/';
+    trend.append(trendStatus, trendLegend, trendPlot, trendRetry, trendCredits);
+    details.append(quoteHeader, detailGrid, positionButton, chartButton, trend, time, source, positionNote);
     article.append(main, details);
     const view = { key, article, main, name, code, fund, stale, price, priceDetail, change, arrow, changeText,
-      pnl, pnlTitle, pnlValue, details, fields, positionButton, chartButton, time, source, positionNote, market, direction: '', fullName: '' };
+      pnl, pnlTitle, pnlValue, details, fields, positionButton, chartButton, time, source, positionNote, market, direction: '', fullName: '',
+      groupId, symbol, trend, trendStatus, trendLegend, trendPlot, trendRetry, trendNext: 0, trendRequest: 0 };
     return view;
   }
 
@@ -759,11 +774,61 @@
     view.main.setAttribute('aria-label', `${view.changeText.textContent}，${view.fullName}，${view.code.textContent}，${open ? '收起' : '展开'}详情`);
     view.main.title = `${view.tooltip || view.fullName}\n点击${open ? '收起' : '展开'}摘要，双击打开详情`;
     view.article.classList.toggle('expanded', open);
+    if (open && !collapsed.has(view.groupId) && !view.trend.hidden) requestTrend(view);
+    else clearTrend(view);
   }
+
+  function clearTrend(view) {
+    view.trendRequest = 0;
+    view.trendNext = 0;
+    view.trendChart?.dispose();
+    view.trendChart = undefined;
+    view.trendPlot.hidden = true;
+    view.trendRetry.hidden = true;
+    setText(view.trendLegend, '');
+  }
+
+  function requestTrend(view, retry = false) {
+    if (!window.StockWatchIntraday || view.trendRequest ||
+        document.hidden || (!retry && Date.now() < view.trendNext)) return;
+    view.trendRequest = ++intradaySequence;
+    view.trendNext = Date.now() + 1_000;
+    view.trendRetry.hidden = true;
+    if (!view.trendChart) setText(view.trendStatus, '正在获取分时走势…');
+    post('intraday', { groupId: view.groupId, symbol: view.symbol, requestId: view.trendRequest, retry });
+  }
+
+  function receiveTrend(message) {
+    const view = groupViews.get(message.groupId)?.rows.get(message.symbol);
+    if (!view || view.trendRequest !== message.requestId || view.details.hidden || collapsed.has(view.groupId)) return;
+    view.trendRequest = 0;
+    if (!message.data) {
+      view.trendNext = Date.now() + 5_000;
+      setText(view.trendStatus, view.trendChart ? '分时更新失败 · 保留上次数据' : message.error);
+      view.trendRetry.hidden = false;
+      return;
+    }
+    setText(view.trendStatus, `分时 · ${message.data.date} · 成交量 · MACD`);
+    view.trendPlot.hidden = false;
+    view.trendChart ??= window.StockWatchIntraday.createIntraday(view.trendPlot, view.trendLegend, true);
+    view.trendChart.theme();
+    view.trendChart.set(message.data);
+  }
+
+  setInterval(() => {
+    if (document.hidden) return;
+    for (const group of groupViews.values()) {
+      if (collapsed.has(group.id)) continue;
+      for (const row of group.rows.values()) {
+        if (!row.details.hidden && !row.trend.hidden) requestTrend(row);
+      }
+    }
+  }, 1_000);
 
   function updateStock(view, symbol, data) {
     const security = data.state.securities[symbol];
     if (!security) return;
+    view.trend.hidden = security.kind === 'metal';
     view.isIndex = security.kind === 'index';
     const quote = data.quotes[symbol];
     const metrics = data.metrics[symbol];
@@ -842,6 +907,7 @@
     const ids = new Set(definitions.map(group => group.id));
     for (const [id, view] of groupViews) {
       if (!ids.has(id)) {
+        for (const row of view.rows.values()) clearTrend(row);
         view.section.remove();
         groupViews.delete(id);
       }
@@ -862,6 +928,7 @@
       const symbols = new Set(group.symbols);
       for (const [symbol, row] of view.rows) {
         if (!symbols.has(symbol)) {
+          clearTrend(row);
           row.article.remove();
           view.rows.delete(symbol);
         }
@@ -976,6 +1043,7 @@
     if (message?.type === 'snapshot') render(message.payload);
     else if (message?.type === 'openPosition') openPosition(message.groupId, message.symbol);
     else if (message?.type === 'positionResult') receivePositionResult(message);
+    else if (message?.type === 'intraday') receiveTrend(message);
     else if (message?.type === 'iconSelected' && settingsDialog.open) {
       png = message.png;
       setText(settingsError, '');

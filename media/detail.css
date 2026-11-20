@@ -5,21 +5,21 @@ body {
   --surface: var(--vscode-editor-background, #181818);
   --foreground: var(--vscode-editor-foreground, #ccc);
   --muted: var(--vscode-descriptionForeground, #999);
-  --up: #ad8b8e;
-  --down: #829e90;
+  --up: #da757a;
+  --down: #66ae8a;
   --line: color-mix(in srgb, var(--foreground) 16%, transparent);
   margin: 0;
   background: var(--surface);
   color: var(--foreground);
-  font: 13px/1.45 var(--vscode-font-family, system-ui, sans-serif);
+  font: 13px/1.45 var(--stock-font-family, var(--vscode-font-family, system-ui, sans-serif));
   font-variant-numeric: tabular-nums;
 }
 body.vscode-light,
-body[data-stock-theme="light"] { --up: #886b6e; --down: #637e70; }
+body[data-stock-theme="light"] { --up: #ac4249; --down: #287650; }
 body[data-stock-theme="light"] { color-scheme: light; --surface: #f7f7f7; --foreground: #333; --muted: #666; }
 body[data-stock-theme="dark"] {
   color-scheme: dark;
-  --surface: #181818; --foreground: #ccc; --muted: #999; --up: #ad8b8e; --down: #829e90;
+  --surface: #181818; --foreground: #ccc; --muted: #999; --up: #da757a; --down: #66ae8a;
 }
 main { max-width: 1160px; margin: auto; padding: clamp(12px, 3vw, 36px); }
 h1, p, dd { margin: 0; }
@@ -38,6 +38,10 @@ button {
   border: 1px solid var(--line); border-radius: 3px; padding: 4px 9px;
 }
 button[aria-pressed="true"] { background: var(--vscode-toolbar-hoverBackground, var(--line)); }
-button:focus-visible, canvas:focus-visible { outline: 1px solid var(--vscode-focusBorder, var(--foreground)); }
+button:focus-visible, #plot:focus-visible, #intraday-plot:focus-visible { outline: 1px solid var(--vscode-focusBorder, var(--foreground)); }
 #status, #legend { margin: 8px 0; color: var(--muted); }
-#plot { display: block; width: 100%; height: 410px; }
+#plot, #intraday-plot { display: block; width: 100%; height: 410px; }
+.stock-chart-divider {
+  position: absolute; left: 10px; right: 10px; height: 1px;
+  background: var(--line); pointer-events: none;
+}

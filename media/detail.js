@@ -1,12 +1,14 @@
 import { CandlestickSeries, ColorType, HistogramSeries, LineSeries, createChart } from 'lightweight-charts';
+import { createIntraday } from './intraday';
 
 (() => {
   'use strict';
   const vscode = acquireVsCodeApi();
   const get = id => document.getElementById(id);
   const plot = get('plot');
+  const minutePlot = get('intraday-plot');
   const periodButtons = new Map();
-  const labels = { day: '日线', week: '周线', month: '月线' };
+  const labels = { intraday: '分时', day: '日线', week: '周线', month: '月线' };
   let period = 'day';
   let requestId = 0;
   let candles = [];
@@ -14,7 +16,10 @@ import { CandlestickSeries, ColorType, HistogramSeries, LineSeries, createChart 
   let selected;
   let pending = false;
   let lastAttempt = 0;
+  let retryAfter = 0;
+  let detailVisible = false;
   let chart, prices, volume, histogram, dif, dea;
+  let minuteChart;
   let chartColors;
   const format = (value, digits = 2) => Number.isFinite(value) ? value.toFixed(digits) : '—';
   const signed = value => Number.isFinite(value) ? (value > 0 ? '+' : '') + format(value) : '—';
@@ -32,17 +37,21 @@ import { CandlestickSeries, ColorType, HistogramSeries, LineSeries, createChart 
     periodButtons.set(key, button);
     get('periods').append(button);
   }
-  retry.addEventListener('click', () => load(period, true, candles.length > 0));
+  retry.addEventListener('click', () => load(period, true, candles.length > 0 || Boolean(minuteChart)));
 
   function load(key, again = false, background = false) {
     period = key;
     pending = true;
     lastAttempt = Date.now();
+    retryAfter = 0;
     for (const [id, button] of periodButtons) button.setAttribute('aria-pressed', String(id === key));
     retry.hidden = true;
     if (!background) {
       status.textContent = '正在获取 K 线…';
       plot.hidden = true;
+      minutePlot.hidden = true;
+      minuteChart?.dispose();
+      minuteChart = undefined;
       get('legend').textContent = '';
       selected = undefined;
       candles = [];
@@ -52,6 +61,7 @@ import { CandlestickSeries, ColorType, HistogramSeries, LineSeries, createChart 
 
   function updateDetail(data) {
     const { instrument, quote, position, metrics, appearance } = data;
+    detailVisible = data.visible && instrument.kind !== 'metal';
     window.applyStockAppearance(appearance);
     const metal = instrument.kind === 'metal';
     const units = metal ? '美元／金衡盎司' : quote?.currency || instrument.currency;
@@ -82,24 +92,33 @@ import { CandlestickSeries, ColorType, HistogramSeries, LineSeries, createChart 
     }));
     get('charts').hidden = metal;
     if (!metal && !requestId) load('day');
-    else if (!metal && data.visible && !pending && Date.now() - lastAttempt >= 15_000) load(period, false, true);
     if (chart) syncColors();
+    minuteChart?.theme();
   }
+  setInterval(() => {
+    if (detailVisible && !document.hidden && !pending && Date.now() >= retryAfter &&
+        Date.now() - lastAttempt >= (period === 'intraday' ? 1_000 : 15_000)) load(period, false, true);
+  }, 1_000);
 
   function syncColors() {
     const style = getComputedStyle(document.body);
     const colors = Object.fromEntries(['surface', 'foreground', 'muted', 'up', 'down'].map(key =>
       [key, style.getPropertyValue('--' + key).trim()]));
+    colors.fontFamily = style.fontFamily;
     if (chartColors && Object.keys(colors).every(key => colors[key] === chartColors[key])) return;
     chartColors = colors;
     const line = style.getPropertyValue('--line').trim();
     chart.applyOptions({
-      layout: { background: { type: ColorType.Solid, color: colors.surface }, textColor: colors.muted },
+      layout: { background: { type: ColorType.Solid, color: colors.surface }, textColor: colors.muted, fontFamily: colors.fontFamily },
       grid: { vertLines: { color: line }, horzLines: { color: line } },
       rightPriceScale: { borderColor: line }, timeScale: { borderColor: line },
     });
-    prices.applyOptions({ upColor: colors.up, downColor: colors.down, wickUpColor: colors.up, wickDownColor: colors.down,
-      borderUpColor: colors.up, borderDownColor: colors.down });
+    prices.applyOptions({
+      upColor: colors.surface, downColor: colors.down,
+      wickVisible: true, borderVisible: true,
+      wickUpColor: colors.up, wickDownColor: colors.down,
+      borderUpColor: colors.up, borderDownColor: colors.down,
+    });
     if (candles.length) renderHistograms();
   }
 
@@ -107,7 +126,7 @@ import { CandlestickSeries, ColorType, HistogramSeries, LineSeries, createChart 
     chart = createChart(plot, {
       autoSize: true, localization: { locale: 'zh-CN' },
       layout: { attributionLogo: true },
-      timeScale: { rightOffset: 3 },
+      timeScale: { rightOffset: 2 },
     });
     const options = { priceLineVisible: false, lastValueVisible: false };
     prices = chart.addSeries(CandlestickSeries, options);
@@ -160,14 +179,22 @@ import { CandlestickSeries, ColorType, HistogramSeries, LineSeries, createChart 
     if (message?.type === 'detail') updateDetail(message);
     if (message?.type !== 'history' || message.requestId !== requestId) return;
     pending = false;
-    lastAttempt = Date.now();
     if (message.error) {
-      status.textContent = candles.length ? `保留上次 K 线 · ${message.error}` : message.error;
+      retryAfter = Date.now() + 5_000;
+      status.textContent = candles.length || minuteChart ? `保留上次图表 · ${message.error}` : message.error;
       retry.hidden = false;
       return;
     }
-    const initial = !candles.length;
-    const timeRange = initial ? null : chart.timeScale().getVisibleRange();
+    if (message.intraday) {
+      status.textContent = `分时 · ${message.intraday.date}（UTC+8） · 成交量 · MACD (12, 26, 9)`;
+      minutePlot.hidden = false;
+      minuteChart ??= createIntraday(minutePlot, get('legend'));
+      minuteChart.set(message.intraday);
+      return;
+    }
+    const previousCount = candles.length;
+    const previousLastDate = candles.at(-1)?.date;
+    const previousRange = previousCount ? chart.timeScale().getVisibleLogicalRange() : null;
     candles = message.candles;
     indicators = message.macd;
     status.textContent = `${labels[period]} · ${message.adjusted ? '前复权' : '原始行情'} · MACD (12, 26, 9)`;
@@ -180,8 +207,18 @@ import { CandlestickSeries, ColorType, HistogramSeries, LineSeries, createChart 
     dif.setData(candles.map((item, index) => ({ time: item.date, value: indicators[index].dif })));
     dea.setData(candles.map((item, index) => ({ time: item.date, value: indicators[index].signal })));
     const scale = chart.timeScale();
-    if (initial) scale.setVisibleLogicalRange({ from: Math.max(0, candles.length - 100), to: candles.length + 2 });
-    else if (timeRange) scale.setVisibleRange(timeRange);
+    if (!previousRange) {
+      // Use the available plot width so that candlestick bodies stay legible in narrow editors.
+      const width = scale.width() || Math.max(0, plot.clientWidth - 60);
+      const visibleBars = Math.max(8, Math.min(80, Math.floor(width / 10) - 2));
+      scale.setVisibleLogicalRange({ from: Math.max(0, candles.length - visibleBars), to: candles.length + 1 });
+    } else {
+      const previousLast = candles.findIndex(item => item.date === previousLastDate);
+      const followingLatest = previousRange.to >= previousCount - 1;
+      const shift = followingLatest ? candles.length - previousCount :
+        previousLast < 0 ? 0 : previousLast - (previousCount - 1);
+      scale.setVisibleLogicalRange({ from: previousRange.from + shift, to: previousRange.to + shift });
+    }
     updateLegend();
   });
   vscode.postMessage({ type: 'ready' });

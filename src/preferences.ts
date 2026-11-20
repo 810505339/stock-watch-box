@@ -1,7 +1,10 @@
 export type SortOrder = 'default' | 'asc' | 'desc';
+const FONT_PRESETS = ['system', 'yahei', 'noto', 'simhei', 'simsun', 'kaiti'] as const;
+type FontPreset = typeof FONT_PRESETS[number];
 
 export interface Preferences {
   fontSize: number;
+  fontFamily: FontPreset;
   theme: 'system' | 'light' | 'dark';
   up: string;
   down: string;
@@ -13,7 +16,7 @@ export interface Preferences {
 }
 
 export const DEFAULT_PREFERENCES: Preferences = {
-  fontSize: 8, theme: 'system', up: '', down: '', title: '', icon: 'none', png: '', gold: true, silver: true,
+  fontSize: 8, fontFamily: 'system', theme: 'system', up: '', down: '', title: '', icon: 'none', png: '', gold: true, silver: true,
 };
 
 export const MAX_ICON_BYTES = 128 * 1024;
@@ -34,6 +37,7 @@ export function preferences(raw: unknown): Preferences {
     /^[A-Za-z0-9+/]+={0,2}$/.test(value.png) && isPng(Buffer.from(value.png, 'base64')) ? value.png : '';
   return {
     fontSize: Number.isInteger(value.fontSize) && value.fontSize! >= 8 && value.fontSize! <= 20 ? value.fontSize! : 8,
+    fontFamily: FONT_PRESETS.find(font => font === value.fontFamily) ?? 'system',
     theme: value.theme === 'light' || value.theme === 'dark' ? value.theme : 'system',
     up: color(value.up), down: color(value.down),
     title: typeof value.title === 'string' ? value.title.replace(/[\r\n\t]/g, ' ').trim().slice(0, 40) : '',

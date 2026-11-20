@@ -6,6 +6,7 @@ import { fetchMarketMetals, fetchQuotes, MARKET_INSTRUMENTS, searchSecurities } 
 import { parsePositionInput } from './position-input';
 import { isPng, MAX_ICON_BYTES, preferences, type Preferences, type SortOrder } from './preferences';
 import { DetailViews } from './detail-view';
+import { IntradayFeed } from './history';
 
 const STORAGE_KEY = 'portfolio.v1';
 const PREFERENCES_KEY = 'appearance.v1';
@@ -14,6 +15,7 @@ interface RowContext { groupId: string; symbol: string; }
 interface SearchItem extends vscode.QuickPickItem { security?: Security; }
 
 class Board implements vscode.WebviewViewProvider, vscode.Disposable {
+  private readonly intraday = new IntradayFeed();
   private view?: vscode.WebviewView;
   private state: PortfolioState;
   private quotes: Record<string, Quote> = {};
@@ -43,7 +45,7 @@ class Board implements vscode.WebviewViewProvider, vscode.Disposable {
       const quote = this.quotes[id];
       return { instrument, quote: quote ?? this.metals[id], position,
         metrics: position ? domain.positionMetrics(position, quote) : undefined };
-    }, () => this.settings, () => this.detailIcon(), () => this.updateRefreshVisibility());
+    }, () => this.settings, () => this.detailIcon(), () => this.updateRefreshVisibility(), this.intraday);
     const raw = context.globalState.get<unknown>(STORAGE_KEY);
     try { this.state = raw === undefined ? domain.createInitialState() : domain.validateState(raw); }
     catch {
@@ -119,10 +121,12 @@ class Board implements vscode.WebviewViewProvider, vscode.Disposable {
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
-    view.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'media')] };
+    const dist = vscode.Uri.joinPath(this.context.extensionUri, 'dist');
+    view.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'media'), dist] };
     const nonce = randomBytes(18).toString('hex');
     const resource = (file: string) => view.webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', file));
-    view.webview.html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${view.webview.cspSource}; script-src 'nonce-${nonce}'; img-src ${view.webview.cspSource} data:;"><link rel="stylesheet" href="${resource('main.css')}"><title>盯盘盒子</title></head><body><main id="app"><header id="header"></header><section id="summary" aria-label="持仓总览"></section><section id="groups" aria-label="自选分类"></section><footer id="footer"></footer></main><script nonce="${nonce}" src="${resource('appearance.js')}"></script><script nonce="${nonce}" src="${resource('main.js')}"></script></body></html>`;
+    const intradayScript = view.webview.asWebviewUri(vscode.Uri.joinPath(dist, 'intraday.js'));
+    view.webview.html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${view.webview.cspSource}; script-src 'nonce-${nonce}'; img-src ${view.webview.cspSource} data:;"><link rel="stylesheet" href="${resource('main.css')}"><title>盯盘盒子</title></head><body><main id="app"><header id="header"></header><section id="summary" aria-label="持仓总览"></section><section id="groups" aria-label="自选分类"></section><footer id="footer"></footer></main><script nonce="${nonce}" src="${resource('appearance.js')}"></script><script nonce="${nonce}" src="${intradayScript}"></script><script nonce="${nonce}" src="${resource('main.js')}"></script></body></html>`;
     const listener = view.webview.onDidReceiveMessage((message: unknown) => {
       if (!message || typeof message !== 'object') return;
       const m = message as Record<string, unknown>;
@@ -137,6 +141,19 @@ class Board implements vscode.WebviewViewProvider, vscode.Disposable {
         case 'openDetail': {
           if (typeof m.symbol === 'string' && (this.rowFrom(m) ||
               (m.groupId === 'market' && this.markets().some(item => item.id === m.symbol)))) this.details.open(m.symbol);
+          break;
+        }
+        case 'intraday': {
+          const row = this.rowFrom(m);
+          const market = m.groupId === 'market' && this.markets().find(item => item.id === m.symbol && item.kind === 'index');
+          const symbol = row?.symbol ?? (market ? market.id : undefined);
+          if (symbol && typeof m.groupId === 'string' && Number.isSafeInteger(m.requestId)) {
+            const response = { type: 'intraday', groupId: m.groupId, symbol, requestId: m.requestId };
+            void this.intraday.load(symbol, m.retry === true).then(
+              data => view.webview.postMessage({ ...response, data }),
+              error => view.webview.postMessage({ ...response, error: error instanceof Error ? error.message : '分时加载失败' }),
+            );
+          }
           break;
         }
         case 'position': void this.edit(() => this.position(m)); break;

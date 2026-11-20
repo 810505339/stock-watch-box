@@ -11,5 +11,6 @@ tsconfig.json
 package-lock.json
 dist/*.map
 media/detail.js
+media/intraday.js
 .gitignore
 *.png

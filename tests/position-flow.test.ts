@@ -216,7 +216,7 @@ test('保存外观并关闭金银后，重启仍保留设置与既有持仓', as
   const first = activateHarness(memory);
   await first.save({ quantity: '100', cost: '3.125' });
   const original = first.api.getSnapshot().state;
-  first.emit({ type: 'saveSettings', settings: { fontSize: 18, theme: 'light', title: '行情', gold: false, silver: false } });
+  first.emit({ type: 'saveSettings', settings: { fontSize: 18, fontFamily: 'yahei', theme: 'light', title: '行情', gold: false, silver: false } });
   await tick();
   assert.ok(first.messages.some(message => message.type === 'settingsSaved'));
   first.dispose();
@@ -226,6 +226,7 @@ test('保存外观并关闭金银后，重启仍保留设置与既有持仓', as
   assert.deepEqual(snapshot.state, original);
   assert.deepEqual(snapshot.markets.map(item => item.code), ['000001', '399006', '000688']);
   assert.equal(snapshot.preferences.fontSize, 18);
+  assert.equal(snapshot.preferences.fontFamily, 'yahei');
   assert.equal(snapshot.preferences.theme, 'light');
   assert.equal(snapshot.preferences.title, '行情');
 });

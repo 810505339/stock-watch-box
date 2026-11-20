@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { randomBytes } from 'node:crypto';
 import type { MarketInstrument, MarketQuote, Metrics, Position, Security } from './types';
 import type { Preferences } from './preferences';
-import { fetchHistory, macd, type History, type Period } from './history';
+import { fetchHistory, macd, type History, type IntradayFeed, type Period } from './history';
 
 interface InstrumentDetail {
   instrument: Security | MarketInstrument;
@@ -28,6 +28,7 @@ export class DetailViews implements vscode.Disposable {
     private readonly appearance: () => Preferences,
     private readonly iconPath: () => vscode.Uri | undefined,
     private readonly onVisibilityChanged: () => void,
+    private readonly intraday: IntradayFeed,
   ) {}
 
   get visible(): boolean {
@@ -52,7 +53,7 @@ export class DetailViews implements vscode.Disposable {
     });
     const listener = panel.webview.onDidReceiveMessage(message => {
       if (message?.type === 'ready') { tab.ready = true; this.update(tab); }
-      if (message?.type === 'history' && ['day', 'week', 'month'].includes(message.period) &&
+      if (message?.type === 'history' && ['intraday', 'day', 'week', 'month'].includes(message.period) &&
           Number.isSafeInteger(message.requestId) && tab.detail.instrument.kind !== 'metal') {
         void this.load(tab, id, message.period, message.requestId, message.retry === true);
       }
@@ -73,7 +74,8 @@ export class DetailViews implements vscode.Disposable {
       <body><main><header><p id="symbol"></p><h1 id="name"></h1><div id="price"></div><p id="source"></p></header>
       <dl id="metrics"></dl><section id="charts" hidden><nav aria-label="K 线周期" id="periods"></nav>
       <p id="status" role="status"></p><button id="retry" hidden>重试</button><p id="legend"></p>
-      <div id="plot" tabindex="0" aria-label="K 线、成交量和 MACD，按左右键查看数据"></div></section>
+      <div id="plot" tabindex="0" aria-label="K 线、成交量和 MACD，按左右键查看数据"></div>
+      <div id="intraday-plot" hidden tabindex="0" aria-label="分时走势、成交量和 MACD，按左右键查看数据"></div></section>
       </main><script nonce="${nonce}" src="${resource('appearance.js')}"></script>
       <script nonce="${nonce}" src="${panel.webview.asWebviewUri(vscode.Uri.joinPath(dist, 'detail.js'))}"></script></body></html>`;
     this.update(tab);
@@ -97,12 +99,17 @@ export class DetailViews implements vscode.Disposable {
     if (tab.ready) void tab.panel.webview.postMessage({ type: 'detail', ...tab.detail, appearance, visible: tab.panel.visible });
   }
 
-  private async load(tab: DetailTab, id: string, period: Period, requestId: number, retry: boolean): Promise<void> {
+  private async load(tab: DetailTab, id: string, period: Period | 'intraday', requestId: number, retry: boolean): Promise<void> {
     tab.request?.abort();
     const request = new AbortController();
     tab.request = request;
     const key = `${id}:${period}`;
     try {
+      if (period === 'intraday') {
+        const data = await this.intraday.load(id, retry);
+        if (!request.signal.aborted) await tab.panel.webview.postMessage({ type: 'history', requestId, intraday: data });
+        return;
+      }
       const cached = this.cache.get(key);
       const fresh = !retry && cached && Date.now() - cached.time < 15_000 ? cached : undefined;
       const history = fresh?.history ?? await fetchHistory(id, period, request.signal);

@@ -2,7 +2,7 @@
   "name": "stock-watch-box",
   "displayName": "盯盘盒子",
   "description": "简洁的股票与场内基金盯盘侧栏 · 腾讯行情 · 分类自选 · 持仓盈亏",
-  "version": "0.2.0",
+  "version": "0.2.3",
   "publisher": "local-stock-watch",
   "repository": { "type": "git", "url": "https://github.com/810505339/stock-watch-box.git" },
   "license": "MIT",
@@ -56,7 +56,7 @@
     "check": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "test:host": "node scripts/test-host.cjs",
-    "package": "vsce package --no-dependencies --allow-missing-repository --out stock-watch-box-0.2.0.vsix"
+    "package": "vsce package --no-dependencies --allow-missing-repository --out stock-watch-box-0.2.3.vsix"
   },
   "devDependencies": {
     "@types/node": "^20.0.0", "@types/vscode": "1.90.0", "@vscode/vsce": "^3.6.0", "esbuild": "^0.25.0", "lightweight-charts": "5.0.9", "tsx": "^4.20.0", "typescript": "^5.8.0"
