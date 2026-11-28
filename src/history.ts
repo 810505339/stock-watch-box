@@ -37,11 +37,14 @@ export function macd(candles: readonly Pick<Candle, 'close'>[]) {
 }
 
 export interface MinutePoint { time: number; price: number; volume: number | null; }
+interface MinuteSession { date?: unknown; data?: unknown; }
+interface MinuteResponse<T> {
+  code?: number;
+  data?: Record<string, { data?: T; qt?: Record<string, unknown[]> }>;
+}
 
 export function parseIntraday(raw: unknown, id: string) {
-  const response = raw as { code?: number; data?: Record<string, {
-    data?: { date?: unknown; data?: unknown }; qt?: Record<string, unknown[]>;
-  }> } | null;
+  const response = raw as MinuteResponse<MinuteSession> | null;
   const series = response?.code === 0 ? response.data?.[id] : undefined;
   const session = series?.data;
   const date = typeof session?.date === 'string' && /^\d{8}$/.test(session.date)
@@ -72,33 +75,72 @@ export function parseIntraday(raw: unknown, id: string) {
   return { date, points, previousClose: close > 0 && Number.isFinite(close) ? close : null };
 }
 
+export function parseLastIntraday(raw: unknown, id: string) {
+  const response = raw as MinuteResponse<MinuteSession[]> | null;
+  const series = response?.code === 0 ? response.data?.[id] : undefined;
+  const rows = Array.isArray(series?.data) ? series.data : [];
+  return rows.map(session => parseIntraday({ code: 0, data: { [id]: { data: session, qt: series?.qt } } }, id))
+    .filter(session => session.points.length > 0)
+    .sort((a, b) => b.date.localeCompare(a.date))[0];
+}
+
 export class IntradayFeed {
-  private readonly cache = new Map<string, { expires: number; value: Awaited<ReturnType<IntradayFeed['download']>> }>();
+  private readonly cache = new Map<string, { startedAt: number; value: Awaited<ReturnType<IntradayFeed['download']>> }>();
   private readonly pending = new Map<string, Promise<Awaited<ReturnType<IntradayFeed['download']>>>>();
+  private readonly closedFailures = new Map<string, number>();
+
+  async loadLast(symbol: string, close: number, retry = false) {
+    const id = normalizeSymbol(symbol);
+    if (!id) throw new Error('此品种暂不提供分时走势');
+    const cached = this.cache.get(id);
+    if (cached && cached.startedAt >= close) return cached.value;
+    if (!retry && this.closedFailures.get(id) === close) {
+      if (cached) return cached.value;
+      throw new Error('暂未取到上一交易时段的分时数据');
+    }
+    try {
+      const data = await this.fetch(id, true);
+      this.closedFailures.delete(id);
+      return data;
+    } catch (error) {
+      this.closedFailures.set(id, close);
+      if (cached) return cached.value;
+      throw error;
+    }
+  }
 
   async load(symbol: string, retry = false) {
     const id = normalizeSymbol(symbol);
     if (!id) throw new Error('此品种暂不提供分时走势');
     const cached = this.cache.get(id);
-    if (!retry && cached && Date.now() < cached.expires) return cached.value;
-    const pending = this.pending.get(id);
+    if (!retry && cached && Date.now() - cached.startedAt < 1_000) return cached.value;
+    return this.fetch(id, false);
+  }
+
+  private fetch(id: string, historical: boolean) {
+    const key = historical ? `${id}:close` : id;
+    const pending = this.pending.get(key);
     if (pending) return pending;
-    const expires = Date.now() + 1_000;
-    const request = this.download(id).then(value => {
-      this.cache.delete(id);
-      this.cache.set(id, { expires, value });
-      if (this.cache.size > 64) this.cache.delete(this.cache.keys().next().value!);
+    const startedAt = Date.now();
+    const request = this.download(id, historical).then(value => {
+      if ((this.cache.get(id)?.startedAt ?? 0) <= startedAt) {
+        this.cache.delete(id);
+        this.cache.set(id, { startedAt, value });
+        if (this.cache.size > 64) this.cache.delete(this.cache.keys().next().value!);
+      }
       return value;
-    }).finally(() => this.pending.delete(id));
-    this.pending.set(id, request);
+    }).finally(() => this.pending.delete(key));
+    this.pending.set(key, request);
     return request;
   }
 
-  private async download(id: string) {
-    const url = new URL('https://web.ifzq.gtimg.cn/appstock/app/minute/query');
+  private async download(id: string, historical: boolean) {
+    const url = new URL(historical ? 'https://web.ifzq.gtimg.cn/appstock/app/day/query' :
+      'https://web.ifzq.gtimg.cn/appstock/app/minute/query');
     url.searchParams.set('code', id);
-    const data = parseIntraday(JSON.parse(await requestText(url.href, undefined, 'utf-8')), id);
-    if (!data.points.length) throw new Error('腾讯暂未返回此品种的分时数据');
+    const raw: unknown = JSON.parse(await requestText(url.href, undefined, 'utf-8'));
+    const data = historical ? parseLastIntraday(raw, id) : parseIntraday(raw, id);
+    if (!data?.points.length) throw new Error('腾讯暂未返回此品种的分时数据');
     return { ...data, macd: macd(data.points.map(point => ({ close: point.price }))) };
   }
 }

@@ -47,7 +47,7 @@ interface Provider { resolveWebviewView(view: unknown): void; }
 interface Response { type: 'positionResult'; requestId: string; ok: boolean; error?: string; }
 type Message = Record<string, unknown>;
 
-function activateHarness(memory = new Memory()) {
+function activateHarness(memory = new Memory(), options?: { now: number; visible: boolean; response?: (url: string) => globalThis.Response }) {
   const disposable = (): Disposable => ({ dispose() {} });
   const messages: Message[] = [];
   const commands = new Map<string, (arg?: unknown) => unknown>();
@@ -58,6 +58,11 @@ function activateHarness(memory = new Memory()) {
   let inputBoxCalls = 0;
   let shown = 0;
   let networkCalls = 0;
+  const requested: string[] = [];
+  const Clock = class extends Date {
+    constructor(value?: string | number) { super(value ?? options!.now); }
+    static now() { return options!.now; }
+  };
   const fakeVscode = {
     Uri: { joinPath: (base: unknown, ...segments: string[]) => `${String(base)}/${segments.join('/')}` },
     workspace: {
@@ -82,13 +87,19 @@ function activateHarness(memory = new Memory()) {
   runInNewContext(extensionCode, {
     module, exports: module.exports,
     require: (id: string) => id === 'vscode' ? fakeVscode : nodeRequire(id),
-    Error, structuredClone, AbortController, TextDecoder, setTimeout, clearTimeout, console,
-    fetch: async () => { networkCalls++; throw new Error('测试禁止网络请求'); },
+    Error, structuredClone, AbortController, TextDecoder, setTimeout, clearTimeout, console, URL,
+    Date: options ? Clock : Date,
+    fetch: async (url: string) => {
+      networkCalls++;
+      requested.push(url);
+      if (options?.response) return options.response(url);
+      throw new Error('测试禁止网络请求');
+    },
   }, { filename: 'extension-under-test.cjs' });
   const api = module.exports.activate({ globalState: memory, extensionUri: 'file:///extension-test', subscriptions });
   assert.ok(provider, 'activation must register the actual Webview provider');
   const view = {
-    visible: false,
+    visible: options?.visible ?? false,
     show: () => { shown++; },
     onDidChangeVisibility: () => disposable(),
     onDidDispose: () => disposable(),
@@ -111,7 +122,7 @@ function activateHarness(memory = new Memory()) {
   assert.ok(receive, 'the provider must listen to Webview messages');
   let sequence = 0;
   return {
-    api, memory, messages,
+    api, memory, messages, requested,
     stats: () => ({ inputBoxCalls, shown, networkCalls }),
     emit: (message: unknown) => receive!(message),
     async save(fields: Message = {}): Promise<Response> {
@@ -133,6 +144,63 @@ function activateHarness(memory = new Memory()) {
     dispose() { for (const subscription of [...subscriptions].reverse()) subscription.dispose(); },
   };
 }
+
+function marketResponse(url: string) {
+  if (url.includes('/day/query')) {
+    return Response.json({ code: 0, data: { sh510300: { data: [
+      { date: '20261126', data: ['1500 4.1 160'] }, { date: '20261127', data: ['1500 4.2 180'] },
+    ] } } });
+  }
+  const symbols = url.split('q=')[1].split(',');
+  return new Response(symbols.map(id => {
+    if (id.startsWith('hf_')) return `v_${id}="35,1,0,0,0,0,15:00:00,34,0,0,0,0,2026-11-27";`;
+    const fields = Array<string>(83).fill('');
+    Object.assign(fields, { 1: 'TEST', 2: id.slice(2), 3: '4.2', 4: '4.1', 30: '20261127150000' });
+    return `v_${id}="${fields.join('~')}";`;
+  }).join(''));
+}
+
+test('周末无缓存时补取一次收盘报价与分时，重启后直接读报价缓存', async t => {
+  const opts = { now: Date.parse('2026-11-28T10:00:00+08:00'), visible: true, response: marketResponse };
+  const memory = new Memory();
+  const harness = activateHarness(memory, opts);
+  t.after(() => harness.dispose());
+  harness.emit({ type: 'ready' });
+  await tick();
+  assert.equal(harness.api.getSnapshot().quotes.sh510300?.price, 4.2);
+  assert.equal(harness.api.getSnapshot().quotes.sh510300?.date, '2026-11-27');
+  assert.equal(harness.api.getSnapshot().marketQuotes.hf_XAU?.price, 35);
+  assert.deepEqual(Array.from(harness.api.getSnapshot().openMarkets), []);
+  harness.emit({ type: 'intraday', ...ROW, requestId: 2 });
+  await tick();
+  harness.emit({ type: 'intraday', ...ROW, requestId: 3 });
+  harness.emit({ type: 'refresh' });
+  await tick();
+  assert.equal(harness.requested.length, 3);
+  assert.ok(harness.requested.some(url => url.includes('/day/query?code=sh510300')));
+  const trend = harness.messages.find(message => message.type === 'intraday' && message.requestId === 3);
+  assert.equal(trend?.closed, true);
+  assert.equal((trend?.data as { date?: string } | undefined)?.date, '2026-11-27');
+  harness.dispose();
+  const reloaded = activateHarness(memory, opts);
+  t.after(() => reloaded.dispose());
+  reloaded.emit({ type: 'ready' });
+  await tick();
+  assert.deepEqual(reloaded.requested, []);
+  assert.equal(reloaded.api.getSnapshot().quotes.sh510300?.price, 4.2);
+});
+
+test('股票跨过新收盘点时补取一次，随后只有开市的金银继续请求', async t => {
+  const opts = { now: Date.parse('2026-11-30T20:00:00+08:00'), visible: true, response: marketResponse };
+  const harness = activateHarness(new Memory(), opts);
+  t.after(() => harness.dispose());
+  harness.emit({ type: 'ready' });
+  await tick();
+  assert.equal(harness.requested.length, 2);
+  harness.emit({ type: 'ready' });
+  await tick();
+  assert.deepEqual(harness.requested.slice(2), ['https://qt.gtimg.cn/q=hf_XAU,hf_XAG']);
+});
 
 test('完整双字段消息一次保存，成功回应与快照一致', async t => {
   const harness = activateHarness();
@@ -209,6 +277,28 @@ test('原生持仓命令只打开内嵌表单，不启动输入框、不改变�
   assert.equal(harness.stats().networkCalls, 0);
   assert.equal(harness.memory.updates.length, 0);
   assert.deepEqual(harness.api.getSnapshot().state.positions, {});
+});
+
+test('分组排序图标循环切换并保留原始手动顺序', async t => {
+  const harness = activateHarness();
+  t.after(() => harness.dispose());
+  const original = harness.api.getSnapshot().state;
+  for (const mode of ['asc', 'desc', 'default']) {
+    harness.emit({ type: 'cycleGroupSort', groupId: ROW.groupId });
+    await tick();
+    assert.equal(harness.api.getSnapshot().sorts[ROW.groupId], mode);
+    assert.deepEqual(harness.api.getSnapshot().state, original);
+  }
+  assert.equal(harness.memory.updates.length, 3);
+});
+
+test('隐藏侧栏时延迟分时请求，且不访问行情接口', async t => {
+  const harness = activateHarness();
+  t.after(() => harness.dispose());
+  harness.emit({ type: 'intraday', ...ROW, requestId: 1 });
+  await tick();
+  assert.equal(harness.stats().networkCalls, 0);
+  assert.deepEqual(harness.messages.at(-1), { type: 'intraday', ...ROW, requestId: 1, skipped: true });
 });
 
 test('保存外观并关闭金银后，重启仍保留设置与既有持仓', async t => {

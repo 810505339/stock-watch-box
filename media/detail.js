@@ -26,6 +26,14 @@ import { createIntraday } from './intraday';
   const tone = value => value > 0 ? 'positive' : value < 0 ? 'negative' : '';
   const status = get('status');
   const retry = get('retry');
+  const charts = get('charts');
+  let trading = false;
+
+  function intradayVisible() {
+    if (!detailVisible || document.hidden || charts.hidden) return false;
+    const rect = charts.getBoundingClientRect();
+    return rect.height > 0 && rect.bottom > 0 && rect.top < innerHeight;
+  }
 
   for (const [key, label] of Object.entries(labels)) {
     const button = document.createElement('button');
@@ -47,7 +55,7 @@ import { createIntraday } from './intraday';
     for (const [id, button] of periodButtons) button.setAttribute('aria-pressed', String(id === key));
     retry.hidden = true;
     if (!background) {
-      status.textContent = '正在获取 K 线…';
+      status.textContent = key === 'intraday' ? '等待分时数据…' : '正在获取 K 线…';
       plot.hidden = true;
       minutePlot.hidden = true;
       minuteChart?.dispose();
@@ -56,12 +64,20 @@ import { createIntraday } from './intraday';
       selected = undefined;
       candles = [];
     }
-    vscode.postMessage({ type: 'history', period, requestId: ++requestId, retry: again });
+    if (key === 'intraday' && !intradayVisible()) {
+      pending = false;
+      lastAttempt = 0;
+      requestId++;
+      return;
+    }
+    vscode.postMessage({ type: 'history', period, requestId: ++requestId, retry: again, background: background && !again });
   }
 
   function updateDetail(data) {
     const { instrument, quote, position, metrics, appearance } = data;
     detailVisible = data.visible && instrument.kind !== 'metal';
+    const justClosed = trading && !data.trading;
+    trading = data.trading;
     window.applyStockAppearance(appearance);
     const metal = instrument.kind === 'metal';
     const units = metal ? '美元／金衡盎司' : quote?.currency || instrument.currency;
@@ -76,6 +92,10 @@ import { createIntraday } from './intraday';
     get('price').replaceChildren(price, units, pct);
     get('source').textContent = `腾讯行情 · ${quote?.time || '暂无报价时间'}${quote?.stale ? ' · 保留上次报价' : ''}`;
     const fields = [['昨收', format(quote?.previousClose, digits)], ['涨跌额', format(quote?.change, digits), quote?.change]];
+    if (!metal) fields.push(
+      ['成交量', window.stockCompactNumber(quote?.volume, instrument.market === 'hk' ? '股' : '手')],
+      ['成交额', window.stockCompactNumber(quote?.turnover, units === 'HKD' ? '港元' : '元')],
+    );
     if (position && metrics) fields.push(['持仓数量', position.quantity.toLocaleString('zh-CN')],
       ['持仓成本', format(position.cost, digits)], ['市值', format(metrics.marketValue)],
       ['日盈亏', signed(metrics.daily), metrics.daily], ['总盈亏', signed(metrics.profit), metrics.profit],
@@ -90,13 +110,15 @@ import { createIntraday } from './intraday';
       item.append(term, result);
       return item;
     }));
-    get('charts').hidden = metal;
+    charts.hidden = metal;
     if (!metal && !requestId) load('day');
+    if (justClosed && period === 'intraday' && intradayVisible()) load('intraday', true, true);
     if (chart) syncColors();
     minuteChart?.theme();
   }
   setInterval(() => {
-    if (detailVisible && !document.hidden && !pending && Date.now() >= retryAfter &&
+    if (trading && detailVisible && !document.hidden && !pending && Date.now() >= retryAfter &&
+        (period !== 'intraday' || intradayVisible()) &&
         Date.now() - lastAttempt >= (period === 'intraday' ? 1_000 : 15_000)) load(period, false, true);
   }, 1_000);
 
@@ -179,6 +201,10 @@ import { createIntraday } from './intraday';
     if (message?.type === 'detail') updateDetail(message);
     if (message?.type !== 'history' || message.requestId !== requestId) return;
     pending = false;
+    if (message.skipped) {
+      lastAttempt = 0;
+      return;
+    }
     if (message.error) {
       retryAfter = Date.now() + 5_000;
       status.textContent = candles.length || minuteChart ? `保留上次图表 · ${message.error}` : message.error;
@@ -186,10 +212,14 @@ import { createIntraday } from './intraday';
       return;
     }
     if (message.intraday) {
-      status.textContent = `分时 · ${message.intraday.date}（UTC+8） · 成交量 · MACD (12, 26, 9)`;
+      status.textContent = `分时 · ${message.intraday.date}（UTC+8） · 成交量 · MACD (12, 26, 9)${message.closed ? ' · 休市' : ''}`;
       minutePlot.hidden = false;
       minuteChart ??= createIntraday(minutePlot, get('legend'));
       minuteChart.set(message.intraday);
+      return;
+    }
+    if (message.closed) {
+      status.textContent = '休市 · 暂无分时缓存';
       return;
     }
     const previousCount = candles.length;

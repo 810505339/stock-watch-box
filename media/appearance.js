@@ -9,6 +9,12 @@
     kaiti: { label: '楷体', stack: 'KaiTi, "楷体", "Kaiti SC", serif' },
   };
   window.stockFontChoices = Object.entries(fontPresets).map(([key, value]) => [key, value.label]);
+  window.stockCompactNumber = (value, unit) => {
+    if (!Number.isFinite(value)) return '—';
+    const divisor = value >= 1e8 ? 1e8 : value >= 1e4 ? 1e4 : 1;
+    const prefix = divisor === 1e8 ? '亿' : divisor === 1e4 ? '万' : '';
+    return `${(value / divisor).toLocaleString('zh-CN', { maximumFractionDigits: 2 })}${prefix}${unit}`;
+  };
   window.applyStockAppearance = settings => {
     const root = document.body;
     root.dataset.stockTheme = settings.theme;

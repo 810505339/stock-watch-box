@@ -97,6 +97,19 @@ test('bare 000001 search returns both Shanghai index and Shenzhen stock without 
   assert.deepEqual((await searchSecurities('000001')).map(s => [s.id, s.kind]), [['sh000001', 'index'], ['sz000001', 'stock']]);
 });
 
+test('按市场解析成交量和成交额，保留精确金额并兼容 A 股万元字段', () => {
+  const quotes = parseTencentQuotes(
+    fixture('sh000001', { 35: '3606.49/634626966/929777242144', 36: '634626966', 37: '92977724' }) +
+    fixture('sz159915', { 36: '1200', 37: '200' }) +
+    fixture('r_hk00700', { 36: '35593034.0', 37: '12403560872.650' }),
+  );
+  assert.equal(quotes.sh000001.volume, 634626966);
+  assert.equal(quotes.sh000001.turnover, 929777242144);
+  assert.equal(quotes.sz159915.turnover, 2_000_000);
+  assert.equal(quotes.hk00700.volume, 35593034);
+  assert.equal(quotes.hk00700.turnover, 12403560872.65);
+});
+
 test('fetch batches at 50 and keeps successful data when another batch fails', async t => {
   const securities: Security[] = Array.from({ length: 51 }, (_, i) => ({ id: `sh${600000 + i}`, code: String(600000 + i), name: 'Stock', market: 'sh', kind: 'stock', currency: 'CNY' }));
   let calls = 0;

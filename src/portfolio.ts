@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Currency, CurrencySummary, Group, Metrics, PortfolioState, Position, Quote, Security } from './types';
 
-export const MAX_GROUP_SIZE = 10;
+export const MAX_GROUP_SIZE = 20;
 const MAX_QUANTITY = 1_000_000_000;
 const MAX_COST = 1_000_000;
 const SYMBOL = /^(?:(?:sh|sz|bj)\d{6}|hk\d{5})$/;
@@ -171,7 +171,7 @@ export function addSecurity(state: PortfolioState, groupId: string, security: Se
   assertSecurity(security);
   const group = getGroup(state, groupId);
   if (group.symbols.includes(security.id)) throw new Error('该证券已在此分类中。');
-  if (group.symbols.length >= MAX_GROUP_SIZE) throw new Error('每个分类最多添加 10 只股票、场内基金或指数。');
+  if (group.symbols.length >= MAX_GROUP_SIZE) throw new Error(`每个分类最多添加 ${MAX_GROUP_SIZE} 只股票、场内基金或指数。`);
   if (security.kind === 'index' && own(state.positions, security.id)) throw new Error('指数只供盯盘，不能录入持仓。');
   const next = copy(state);
   next.securities[security.id] = { ...security };
@@ -193,7 +193,7 @@ export function moveSecurity(state: PortfolioState, fromId: string, toId: string
   if (!source.symbols.includes(symbol)) throw new Error('该证券已不在此分类中。');
   if (fromId === toId) return copy(state);
   if (target.symbols.includes(symbol)) throw new Error('目标分类已包含该证券。');
-  if (target.symbols.length >= MAX_GROUP_SIZE) throw new Error('目标分类已有 10 只证券，请先移除一只。');
+  if (target.symbols.length >= MAX_GROUP_SIZE) throw new Error(`目标分类已有 ${MAX_GROUP_SIZE} 只证券，请先移除一只。`);
   const next = copy(state);
   getGroup(next, fromId).symbols = source.symbols.filter(id => id !== symbol);
   getGroup(next, toId).symbols.push(symbol);
@@ -211,7 +211,7 @@ export function reorderSecurity(state: PortfolioState, fromGroupId: string, toGr
   const sameGroup = fromGroupId === toGroupId;
   if (!sameGroup) {
     if (target.symbols.includes(symbol)) throw new Error('目标分类已包含该证券。');
-    if (target.symbols.length >= MAX_GROUP_SIZE) throw new Error('目标分类已有 10 只证券，请先移除一只。');
+    if (target.symbols.length >= MAX_GROUP_SIZE) throw new Error(`目标分类已有 ${MAX_GROUP_SIZE} 只证券，请先移除一只。`);
   }
   const next = copy(state);
   if (sameGroup && symbol === beforeSymbol) return next;

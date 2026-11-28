@@ -24,6 +24,9 @@
     chevron: 'm6 3 5 5-5 5',
     more: 'M3 8h.01M8 8h.01M13 8h.01',
     chart: 'M2 12V4m0 8h12M5 9l3-4 3 2 3-5',
+    sortDefault: 'M5 13V3m-3 3 3-3 3 3m3-3v10m-3-3 3 3 3-3',
+    sortAsc: 'M5 13V3m-3 3 3-3 3 3m2 6h4m-4-4h3m-3-4h2',
+    sortDesc: 'M5 3v10m-3-3 3 3 3-3m2-6h4m-4 4h3m-3 4h2',
     settings: 'M2 4h12M2 8h12M2 12h12M5 2v4m5 0v4m-4 0v4',
     candles: 'M4 2v3m0 6v3M2 5h4v6H2zM10 2v2m0 5v5M8 4h4v5H8z',
     up: 'M8 13V3m-4 4 4-4 4 4',
@@ -412,9 +415,10 @@
   const groupList = node('div', 'group-list');
   const empty = node('div', 'empty-state');
   const emptyIcon = node('div', 'empty-icon');
+  const emptyDescription = node('p');
   emptyIcon.append(icon('chart'));
   empty.append(emptyIcon, node('h2', '', '还没有自选分类'),
-    node('p', '', '先创建一个分类，再添加股票。每个分类最多 10 只。'),
+    emptyDescription,
     textButton('创建第一个分类', 'plus', () => post('addGroup'), 'primary-button'));
   const emptyHint = node('p', 'empty-hint', '右键股票可添加持仓，自动计算盈亏。');
   empty.append(emptyHint);
@@ -430,6 +434,28 @@
   const errorText = node('div', 'error-text');
   const footerHint = node('div', 'footer-hint', '右键股票管理持仓 · 数据仅供参考');
   footer.append(statusRow, errorText, footerHint);
+  const sortTooltip = node('div', 'sort-tooltip');
+  sortTooltip.id = 'sort-tooltip';
+  sortTooltip.setAttribute('role', 'tooltip');
+  sortTooltip.hidden = true;
+  document.body.append(sortTooltip);
+  let tooltipAnchor;
+
+  function showSortTooltip(anchor) {
+    tooltipAnchor = anchor;
+    setText(sortTooltip, anchor.dataset.hint);
+    sortTooltip.hidden = false;
+    const bounds = anchor.getBoundingClientRect();
+    sortTooltip.style.left = `${Math.max(4, Math.min(bounds.right - sortTooltip.offsetWidth, innerWidth - sortTooltip.offsetWidth - 4))}px`;
+    const below = bounds.bottom + 4;
+    sortTooltip.style.top = `${below + sortTooltip.offsetHeight <= innerHeight ? below : bounds.top - sortTooltip.offsetHeight - 4}px`;
+  }
+
+  function hideSortTooltip(anchor = tooltipAnchor) {
+    if (anchor !== tooltipAnchor) return;
+    tooltipAnchor = undefined;
+    sortTooltip.hidden = true;
+  }
 
   const positionDialog = node('dialog', 'position-dialog');
   positionDialog.setAttribute('aria-labelledby', 'position-title');
@@ -632,12 +658,21 @@
     const count = node('span', 'group-count');
     toggle.append(name, count);
     const add = button('添加股票 / 场内基金', 'plus', () => post('addStock', { groupId: group.id }));
+    const sort = button('切换排序', 'sortDefault', () => post('cycleGroupSort', { groupId: group.id }), 'icon-button group-sort');
+    sort.removeAttribute('title');
+    sort.addEventListener('pointerenter', () => showSortTooltip(sort));
+    sort.addEventListener('pointerleave', () => hideSortTooltip(sort));
+    sort.addEventListener('focus', () => showSortTooltip(sort));
+    sort.addEventListener('blur', () => hideSortTooltip(sort));
     const menu = button('分类操作', 'more', () => post('groupMenu', { groupId: group.id }));
-    groupHeader.append(toggle, add, menu);
+    const average = node('span', 'group-average');
+    groupHeader.append(toggle, average, sort, add, menu);
     if (group.id === 'market') {
       groupHeader.removeAttribute('data-vscode-context');
       add.hidden = true;
+      sort.hidden = true;
       menu.hidden = true;
+      average.hidden = true;
     }
     const body = node('div', 'group-body');
     const stockList = node('div', 'stock-list');
@@ -646,7 +681,7 @@
     body.addEventListener('dragover', event => acceptDrop(event, { kind: 'stock', groupId: group.id }, body, 'drop-tail'));
     body.addEventListener('drop', event => performDrop(event, { kind: 'stock', groupId: group.id }));
     section.append(groupHeader, body);
-    const view = { section, toggle, name, count, add, body, stockList, addFirst, rows: new Map(), id: group.id };
+    const view = { section, toggle, name, count, average, sort, add, body, stockList, addFirst, rows: new Map(), id: group.id };
     groupViews.set(group.id, view);
     return view;
   }
@@ -658,6 +693,8 @@
     view.toggle.setAttribute('aria-label', `${closed ? '展开' : '折叠'} ${view.name.textContent}`);
     view.toggle.title = `${closed ? '展开' : '折叠'}分类`;
     view.section.classList.toggle('collapsed', closed);
+    if (closed) for (const row of view.rows.values()) clearTrend(row);
+    else scheduleVisibleTrends();
   }
 
   function detail(label) {
@@ -683,6 +720,7 @@
       if (expanded.has(key)) expanded.delete(key);
       else expanded.add(key);
       updateExpanded(view);
+      scheduleVisibleTrends();
       persist();
     }, 'stock-main');
     main.addEventListener('dblclick', event => {
@@ -735,7 +773,7 @@
     quoteHeader.append(node('span', 'metric-label', '现价'), priceDetail, fund, stale);
     const detailGrid = node('dl', 'detail-grid');
     const fields = {};
-    for (const [id, label] of [['previous', '昨日收盘'], ['change', '涨跌金额'], ['quantity', '持仓数量'],
+    for (const [id, label] of [['previous', '昨日收盘'], ['change', '涨跌金额'], ['volume', '成交量'], ['turnover', '成交额'], ['quantity', '持仓数量'],
       ['cost', '单位成本'], ['marketValue', '持仓市值'], ['profit', '持仓盈亏'],
       ['costValue', '持仓成本'], ['profitPercent', '持仓收益率']]) {
       const field = detail(label);
@@ -774,13 +812,13 @@
     view.main.setAttribute('aria-label', `${view.changeText.textContent}，${view.fullName}，${view.code.textContent}，${open ? '收起' : '展开'}详情`);
     view.main.title = `${view.tooltip || view.fullName}\n点击${open ? '收起' : '展开'}摘要，双击打开详情`;
     view.article.classList.toggle('expanded', open);
-    if (open && !collapsed.has(view.groupId) && !view.trend.hidden) requestTrend(view);
-    else clearTrend(view);
+    if (!open || collapsed.has(view.groupId) || view.trend.hidden) clearTrend(view);
   }
 
   function clearTrend(view) {
     view.trendRequest = 0;
     view.trendNext = 0;
+    view.trendClosed = false;
     view.trendChart?.dispose();
     view.trendChart = undefined;
     view.trendPlot.hidden = true;
@@ -789,7 +827,8 @@
   }
 
   function requestTrend(view, retry = false) {
-    if (!window.StockWatchIntraday || view.trendRequest ||
+    if (!window.StockWatchIntraday || view.trendRequest || !trendVisible(view) ||
+        (!retry && !view.trading && view.trendClosed) ||
         document.hidden || (!retry && Date.now() < view.trendNext)) return;
     view.trendRequest = ++intradaySequence;
     view.trendNext = Date.now() + 1_000;
@@ -798,24 +837,43 @@
     post('intraday', { groupId: view.groupId, symbol: view.symbol, requestId: view.trendRequest, retry });
   }
 
+  function trendVisible(view) {
+    if (view.details.hidden || view.trend.hidden || collapsed.has(view.groupId)) return false;
+    const area = view.trend.getBoundingClientRect();
+    const viewport = groups.getBoundingClientRect();
+    return area.width > 0 && area.height > 0 &&
+      area.bottom > Math.max(0, viewport.top) && area.top < Math.min(innerHeight, viewport.bottom) &&
+      area.right > Math.max(0, viewport.left) && area.left < Math.min(innerWidth, viewport.right);
+  }
+
   function receiveTrend(message) {
     const view = groupViews.get(message.groupId)?.rows.get(message.symbol);
     if (!view || view.trendRequest !== message.requestId || view.details.hidden || collapsed.has(view.groupId)) return;
     view.trendRequest = 0;
+    if (message.skipped) {
+      view.trendNext = 0;
+      return;
+    }
+    view.trendClosed = Boolean(message.closed);
+    if (message.closed && !message.data) {
+      setText(view.trendStatus, view.trendChart ? '休市 · 保留上次分时数据' : `休市 · ${message.error || '暂无分时数据'}`);
+      view.trendRetry.hidden = !message.error;
+      return;
+    }
     if (!message.data) {
       view.trendNext = Date.now() + 5_000;
       setText(view.trendStatus, view.trendChart ? '分时更新失败 · 保留上次数据' : message.error);
       view.trendRetry.hidden = false;
       return;
     }
-    setText(view.trendStatus, `分时 · ${message.data.date} · 成交量 · MACD`);
+    setText(view.trendStatus, `分时 · ${message.data.date} · 成交量 · MACD${message.closed ? ' · 休市' : ''}`);
     view.trendPlot.hidden = false;
     view.trendChart ??= window.StockWatchIntraday.createIntraday(view.trendPlot, view.trendLegend, true);
     view.trendChart.theme();
     view.trendChart.set(message.data);
   }
 
-  setInterval(() => {
+  function refreshVisibleTrends() {
     if (document.hidden) return;
     for (const group of groupViews.values()) {
       if (collapsed.has(group.id)) continue;
@@ -823,11 +881,27 @@
         if (!row.details.hidden && !row.trend.hidden) requestTrend(row);
       }
     }
-  }, 1_000);
+  }
+
+  let trendFrame;
+  function scheduleVisibleTrends() {
+    if (trendFrame !== undefined) return;
+    trendFrame = requestAnimationFrame(() => {
+      trendFrame = undefined;
+      refreshVisibleTrends();
+    });
+  }
+  setInterval(refreshVisibleTrends, 1_000);
+  document.addEventListener('visibilitychange', scheduleVisibleTrends);
+  window.addEventListener('resize', scheduleVisibleTrends);
 
   function updateStock(view, symbol, data) {
     const security = data.state.securities[symbol];
     if (!security) return;
+    const trading = data.openMarkets?.includes(security.market) ?? true;
+    if (view.trading !== trading || view.trendDay !== data.today) view.trendClosed = false;
+    view.trading = trading;
+    view.trendDay = data.today;
     view.trend.hidden = security.kind === 'metal';
     view.isIndex = security.kind === 'index';
     const quote = data.quotes[symbol];
@@ -871,6 +945,9 @@
     setText(view.fields.previous, number(quote?.previousClose, priceDecimals));
     setText(view.fields.change, signed(quote?.change, priceDecimals));
     tone(view.fields.change, quote?.change);
+    view.fields.volume.parentElement.hidden = view.fields.turnover.parentElement.hidden = security.kind === 'metal';
+    setText(view.fields.volume, window.stockCompactNumber(quote?.volume, security.market === 'hk' ? '股' : '手'));
+    setText(view.fields.turnover, window.stockCompactNumber(quote?.turnover, currency === 'HKD' ? '港元' : '元'));
     setText(view.fields.quantity, position ? `${number(position.quantity, 0)} ${security.kind === 'fund' ? '份' : '股'}` : '未设置');
     setText(view.fields.cost, position ? `${number(position.cost, priceDecimals)} ${currency}` : '—');
     setText(view.fields.marketValue, money(metrics?.marketValue, currency));
@@ -907,6 +984,7 @@
     const ids = new Set(definitions.map(group => group.id));
     for (const [id, view] of groupViews) {
       if (!ids.has(id)) {
+        hideSortTooltip(view.sort);
         for (const row of view.rows.values()) clearTrend(row);
         view.section.remove();
         groupViews.delete(id);
@@ -919,9 +997,26 @@
       view.name.title = group.name;
       const isMarket = group.id === 'market';
       const order = data.sorts[group.id];
-      setText(view.count, isMarket ? '' : `${group.symbols.length}/10${order === 'asc' ? ' ↑' : order === 'desc' ? ' ↓' : ''}`);
-      view.add.disabled = group.symbols.length >= 10;
-      view.add.title = view.add.disabled ? '分类已满（最多 10 只）' : `添加股票 / 场内基金到 ${group.name}`;
+      setText(view.count, isMarket ? '' : `${group.symbols.length}/${data.groupLimit}`);
+      if (!isMarket) {
+        const changes = group.symbols.map(id => data.quotes[id]?.changePercent).filter(finite);
+        const average = changes.length ? changes.reduce((sum, value) => sum + value, 0) / changes.length : null;
+        setText(view.average, percent(average));
+        view.average.title = `组内平均涨跌幅（${changes.length}/${group.symbols.length} 只有报价）`;
+        tone(view.average, average);
+      }
+      const sortState = order === 'asc' ? 'asc' : order === 'desc' ? 'desc' : 'default';
+      if (!isMarket && view.sort.dataset.sort !== sortState) {
+        const labels = { default: '默认顺序', asc: '涨跌幅升序', desc: '涨跌幅降序' };
+        const next = sortState === 'default' ? 'asc' : sortState === 'asc' ? 'desc' : 'default';
+        view.sort.dataset.sort = sortState;
+        view.sort.replaceChildren(icon(sortState === 'asc' ? 'sortAsc' : sortState === 'desc' ? 'sortDesc' : 'sortDefault'));
+        view.sort.dataset.hint = `当前${labels[sortState]}，点击切换为${labels[next]}`;
+        view.sort.setAttribute('aria-label', view.sort.dataset.hint);
+        if (tooltipAnchor === view.sort) showSortTooltip(view.sort);
+      }
+      view.add.disabled = group.symbols.length >= data.groupLimit;
+      view.add.title = view.add.disabled ? `分类已满（最多 ${data.groupLimit} 只）` : `添加股票 / 场内基金到 ${group.name}`;
       view.add.setAttribute('aria-label', view.add.title);
       view.addFirst.hidden = isMarket || group.symbols.length > 0;
       updateCollapsed(view);
@@ -989,6 +1084,7 @@
     if (!data?.state || !Array.isArray(data.state.groups) || !Array.isArray(data.summaries)) return;
     const first = !snapshot;
     snapshot = data;
+    setText(emptyDescription, `先创建一个分类，再添加股票。每个分类最多 ${data.groupLimit} 只。`);
     if (!settingsDialog.open) applySettings(data.preferences);
     updateSummary(data);
     reconcileGroups(data);
@@ -997,7 +1093,9 @@
     refreshButton.setAttribute('aria-label', data.refreshing ? '正在刷新行情' : '刷新行情');
     statusDot.classList.toggle('warning', Boolean(data.error));
     statusDot.classList.toggle('loading', data.refreshing);
-    setText(statusText, data.refreshing ? '正在刷新' : data.error ? '行情连接异常' : data.updatedAt ? '行情已更新' : '等待行情');
+    const trading = data.openMarkets?.some(market => data.markets.some(item => item.market === market) ||
+      Object.values(data.state.securities).some(item => item.market === market));
+    setText(statusText, data.refreshing ? '正在刷新' : !trading ? '休市 · 更新暂停' : data.error ? '行情连接异常' : data.updatedAt ? '行情已更新' : '等待行情');
     let time = '';
     if (finite(data.updatedAt)) {
       time = new Intl.DateTimeFormat('zh-CN', {
@@ -1016,8 +1114,10 @@
 
   let scrollTimer;
   groups.addEventListener('scroll', () => {
+    hideSortTooltip();
     clearTimeout(scrollTimer);
     scrollTimer = setTimeout(persist, 120);
+    scheduleVisibleTrends();
   }, { passive: true });
   groups.addEventListener('dragover', event => {
     if (event.target !== groups && event.target !== groupList) return;
@@ -1029,6 +1129,7 @@
   });
   window.addEventListener('dragend', finishDrag);
   window.addEventListener('keydown', event => {
+    if (event.key === 'Escape') hideSortTooltip();
     if (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && event.key.toLowerCase() === 'q') {
       event.preventDefault();
       event.stopPropagation();

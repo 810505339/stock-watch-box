@@ -40,12 +40,12 @@ test('分类名称校验、不可变更新与重名约束', () => {
   assert.equal(renamed.groups[1].name, 'ETF');
 });
 
-test('第十只可添加、第十一只被拒绝；同组重复被拒绝', () => {
+test('第二十只可添加、第二十一只被拒绝；同组重复被拒绝', () => {
   let state = createInitialState();
   const id = state.groups[0].id;
-  for (let i = 0; i < 10; i++) state = addSecurity(state, id, security(String(600000 + i)));
-  assert.equal(state.groups[0].symbols.length, 10);
-  assert.throws(() => addSecurity(state, id, security('600010')), /最多添加 10/);
+  for (let i = 0; i < 20; i++) state = addSecurity(state, id, security(String(600000 + i)));
+  assert.equal(state.groups[0].symbols.length, 20);
+  assert.throws(() => addSecurity(state, id, security('600020')), /最多添加 20/);
   assert.throws(() => addSecurity(state, id, security('600000')), /已在此分类/);
 });
 
@@ -60,8 +60,8 @@ test('移动证券保留持仓；目标满组及已有证券时拒绝且不改�
   state = addSecurity(state, to.id, security());
   assert.throws(() => moveSecurity(state, from.id, to.id, 'sh600000'), /已包含/);
   state = removeSecurity(state, to.id, 'sh600000');
-  for (let i = 1; i <= 10; i++) state = addSecurity(state, to.id, security(String(600000 + i)));
-  assert.throws(() => moveSecurity(state, from.id, to.id, 'sh600000'), /已有 10/);
+  for (let i = 1; i <= 20; i++) state = addSecurity(state, to.id, security(String(600000 + i)));
+  assert.throws(() => moveSecurity(state, from.id, to.id, 'sh600000'), /已有 20/);
   assert.equal(state.groups[0].symbols.length, 1);
 });
 
@@ -263,15 +263,15 @@ test('跨组拖拽按指定目标插入并保留唯一持仓，不产生重复�
     ['sh600001', 'sh510300', 'sh600000']);
 });
 
-test('跨组拖拽拒绝目标重复与第十一只，同组限制不误伤移动', () => {
+test('跨组拖拽拒绝目标重复与第二十一只，同组限制不误伤移动', () => {
   let state = addGroup(withPosition(), '目标');
   const [fromId, toId] = state.groups.map(group => group.id);
   state = addSecurity(state, toId, security());
   assert.throws(() => reorderSecurity(state, fromId, toId, 'sh600000'), /已包含/);
   state = removeSecurity(state, toId, 'sh600000');
-  for (let i = 1; i <= 10; i++) state = addSecurity(state, toId, security(String(600000 + i)));
+  for (let i = 1; i <= 20; i++) state = addSecurity(state, toId, security(String(600000 + i)));
   const before = structuredClone(state);
-  assert.throws(() => reorderSecurity(state, fromId, toId, 'sh600000', 'sh600001'), /已有 10/);
+  assert.throws(() => reorderSecurity(state, fromId, toId, 'sh600000', 'sh600001'), /已有 20/);
   assert.deepEqual(state, before);
 });
 

@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import type { MarketInstrument, MarketQuote, Metrics, Position, Security } from './types';
 import type { Preferences } from './preferences';
 import { fetchHistory, macd, type History, type IntradayFeed, type Period } from './history';
+import { lastStockClose, marketIsOpen } from './market-hours';
 
 interface InstrumentDetail {
   instrument: Security | MarketInstrument;
@@ -55,6 +56,14 @@ export class DetailViews implements vscode.Disposable {
       if (message?.type === 'ready') { tab.ready = true; this.update(tab); }
       if (message?.type === 'history' && ['intraday', 'day', 'week', 'month'].includes(message.period) &&
           Number.isSafeInteger(message.requestId) && tab.detail.instrument.kind !== 'metal') {
+        if ((message.period === 'intraday' || message.background === true) && !panel.visible) {
+          void panel.webview.postMessage({ type: 'history', requestId: message.requestId, skipped: true });
+          return;
+        }
+        if (message.background === true && !marketIsOpen(tab.detail.instrument.market)) {
+          void panel.webview.postMessage({ type: 'history', requestId: message.requestId, skipped: true });
+          return;
+        }
         void this.load(tab, id, message.period, message.requestId, message.retry === true);
       }
     });
@@ -96,7 +105,9 @@ export class DetailViews implements vscode.Disposable {
     const { instrument } = tab.detail;
     tab.panel.title = [appearance.title, instrument.name].filter(Boolean).join(' · ');
     tab.panel.iconPath = this.iconPath();
-    if (tab.ready) void tab.panel.webview.postMessage({ type: 'detail', ...tab.detail, appearance, visible: tab.panel.visible });
+    if (tab.ready) void tab.panel.webview.postMessage({
+      type: 'detail', ...tab.detail, appearance, visible: tab.panel.visible, trading: marketIsOpen(instrument.market),
+    });
   }
 
   private async load(tab: DetailTab, id: string, period: Period | 'intraday', requestId: number, retry: boolean): Promise<void> {
@@ -106,8 +117,11 @@ export class DetailViews implements vscode.Disposable {
     const key = `${id}:${period}`;
     try {
       if (period === 'intraday') {
-        const data = await this.intraday.load(id, retry);
-        if (!request.signal.aborted) await tab.panel.webview.postMessage({ type: 'history', requestId, intraday: data });
+        const market = tab.detail.instrument.market;
+        const closed = market !== 'london' && !marketIsOpen(market);
+        const data = closed ? await this.intraday.loadLast(id, lastStockClose(market), retry) :
+          await this.intraday.load(id, retry);
+        if (!request.signal.aborted) await tab.panel.webview.postMessage({ type: 'history', requestId, intraday: data, closed });
         return;
       }
       const cached = this.cache.get(key);

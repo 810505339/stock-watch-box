@@ -84,8 +84,14 @@ export function parseTencentQuotes(text: string, fetchedAt = Date.now()): Record
     const difference = price !== null && previousClose !== null ? price - previousClose : null;
     const change = numeric(fields[31]) ?? difference;
     const changePercent = numeric(fields[32]) ?? (difference !== null && previousClose !== null ? difference / previousClose * 100 : null);
+    const volume = numeric(fields[36]);
+    const reportedTurnover = numeric(fields[37]);
+    const turnover = market === 'hk' ? reportedTurnover :
+      numeric(fields[35]?.split('/')[2]) ?? (reportedTurnover === null ? null : reportedTurnover * 10_000);
     quotes[id] = {
       id, name: fields[1].trim(), price, previousClose, change, changePercent, currency,
+      volume: volume !== null && volume >= 0 ? volume : null,
+      turnover: turnover !== null && turnover >= 0 ? turnover : null,
       ...parseQuoteTime(fields[30] ?? ''), fetchedAt,
     };
   }
